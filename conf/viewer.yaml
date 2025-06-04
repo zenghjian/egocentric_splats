@@ -1,0 +1,26 @@
+defaults: 
+ - opt: simple_gsplat_30K # select other GS model 
+
+model_root: 
+host: "0.0.0.0"
+port: 8080
+image_format: "jpeg"
+reorient: "auto"
+enable_transform: false 
+show_cameras: false 
+load_raw_ply: !!bool false
+train_model: "vanillaGS"
+
+camera_model: "linear"  # or spherical
+color_format: "rgbm"
+
+wandb: 
+  use_wandb: !!bool False # If false, we will turn off logging
+
+model:
+  sh_degree: 3
+  dim_extra: 0
+  white_background: !!bool True
+
+  use_3d_smooth_filter: !!bool True 
+
