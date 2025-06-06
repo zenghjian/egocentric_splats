@@ -2,7 +2,7 @@
 
 <h2> Photoreal Scene Reconstruction from an Egocentric Device </h2>
 
-<a href="#"><img src="https://img.shields.io/badge/arxiv-red" alt="arXiv"></a>
+<a href="https://arxiv.org/abs/2506.04444"><img src="https://img.shields.io/badge/arxiv-red" alt="arXiv"></a>
 <a href="https://www.projectaria.com/photoreal-reconstruction/">
   <img src="https://img.shields.io/badge/Photoreal_Reconstruction-project_page-blue" alt="Project Page">
 </a>
