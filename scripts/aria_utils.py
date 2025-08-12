@@ -171,8 +171,8 @@ def project(
             or v_proj >= frame_h - 1
             and z > 0
         ):
-            return None, None, None
-        return u_proj, v_proj, z
+            return None, None, None, np.array([False])
+        return u_proj, v_proj, z, np.array([True])
 
 
 def read_frames_from_metadata(transforms_json: str = "transforms.json"):

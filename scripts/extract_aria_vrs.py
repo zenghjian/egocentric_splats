@@ -968,7 +968,7 @@ def create_visible_depth_map(
         for uid in uids:
             pt3d = points3d[uid].position_world
 
-            u, v, z = project(pt3d[:, None], w2c, calibK, frame_h, frame_w)
+            u, v, z, _ = project(pt3d[:, None], w2c, calibK, frame_h, frame_w)
 
             if u is not None:
                 frame_pts3d["u"].append(u[0])
