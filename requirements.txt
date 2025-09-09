@@ -26,4 +26,4 @@ lightning[pytorch-extra]
 natsort
 viser>=0.2.3
 exifread
-gsplat>=1.4.0
+gsplat==1.4.0

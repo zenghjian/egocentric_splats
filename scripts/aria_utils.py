@@ -350,6 +350,126 @@ def process_frame(
     }
 
 
+def undistort_depth(
+    frame: AriaFrame,
+    depth_raw: np.ndarray,
+    camera_model: str,
+    ow: int,
+    oh: int,
+    f: float,
+):
+    """
+    Undistort/rectify depth map using the same method as undistort_image.
+    Follows exactly the same process as RGB rectification.
+    """
+    # we assume fx and fy are the same
+    proj_params = np.asarray([frame.fx, frame.cx, frame.cy])
+    proj_params = np.concatenate((proj_params, frame.distortion_params))
+
+    transform_matrix = SE3()
+
+    frame_calib = calibration.CameraCalibration(
+        frame.camera_name,
+        calibration.CameraModelType.FISHEYE624,
+        proj_params,
+        transform_matrix,
+        frame.w,
+        frame.h,
+        None,
+        90.0,
+        "",
+    )
+
+    if camera_model == "linear":
+        out_calib = calibration.get_linear_camera_calibration(ow, oh, f)
+    elif camera_model == "spherical":
+        out_calib = calibration.get_spherical_camera_calibration(ow, oh, f)
+    else:
+        raise NotImplementedError(
+            f"cannot recognized camera model type {camera_model} !"
+        )
+
+    # Convert depth to disparity for better interpolation
+    valid_mask = depth_raw > 0
+    disparity = np.zeros_like(depth_raw)
+    disparity[valid_mask] = 1.0 / depth_raw[valid_mask]
+    
+    # Rectify using the same function as images
+    rectified_disparity = calibration.distort_by_calibration(disparity, out_calib, frame_calib)
+    
+    # Convert back to depth
+    rectified_depth = np.zeros_like(rectified_disparity)
+    valid_rect = rectified_disparity > 0
+    rectified_depth[valid_rect] = 1.0 / rectified_disparity[valid_rect]
+
+    return rectified_depth
+
+
+def process_depth_frame(
+    frame: AriaFrame,
+    depth_raw: np.ndarray,
+    output_folder: Path,
+    camera_model: str,
+    rectified_focal: float,
+    rectified_h: int,
+    rectified_w: int = None,
+):
+    """
+    Process a depth frame following the exact same pattern as process_frame for RGB.
+    """
+    if rectified_w is None:
+        rectified_w = int((rectified_h / frame.h) * frame.w)
+
+    # Undistort depth using same parameters as RGB
+    depth = undistort_depth(
+        frame, depth_raw, camera_model, rectified_w, rectified_h, rectified_focal
+    )
+
+    # Save rectified depth
+    timestamp = frame.timestamp
+    depth_output_subpath = f"depth_maps/depth_{timestamp}.npy"
+    depth_output_path = output_folder / depth_output_subpath
+    depth_output_path.parent.mkdir(exist_ok=True)
+    
+    np.save(depth_output_path, depth.astype(np.float32))
+    
+    # Also save as visualization image (optional)
+    if True:  # Set to True to save depth visualization
+        # Normalize depth for visualization (clip to reasonable range)
+        depth_vis = depth.copy()
+        valid_mask = depth_vis > 0
+        if valid_mask.any():
+            # Clip to 0.5m - 10m range for indoor scenes
+            depth_vis = np.clip(depth_vis, 0.5, 10.0)
+            # Normalize to 0-255
+            depth_vis = ((depth_vis - 0.5) / (10.0 - 0.5) * 255).astype(np.uint8)
+            # Apply colormap
+            from PIL import Image
+            import cv2
+            depth_colored = cv2.applyColorMap(depth_vis, cv2.COLORMAP_JET)
+            # Save as PNG
+            depth_img_path = depth_output_path.with_suffix('.png')
+            Image.fromarray(depth_colored).save(depth_img_path)
+
+    # Reference: https://github.com/facebookresearch/projectaria_tools/blob/main/core/calibration/CameraCalibration.cpp#L153
+    output_fx = rectified_focal
+    output_fy = rectified_focal
+    output_cx = (rectified_w - 1) / 2.0
+    output_cy = (rectified_h - 1) / 2.0
+
+    return {
+        "depth_path": depth_output_subpath,
+        "depth_min": float(depth[depth > 0].min()) if (depth > 0).any() else 0,
+        "depth_max": float(depth.max()),
+        "depth_fx": output_fx,
+        "depth_fy": output_fy,
+        "depth_cx": output_cx,
+        "depth_cy": output_cy,
+        "depth_w": rectified_w,
+        "depth_h": rectified_h,
+    }
+
+
 def calculate_timestamp_to_data3d(
     semidense_points_data,
     semidense_observations,

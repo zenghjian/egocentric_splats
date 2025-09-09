@@ -59,6 +59,12 @@ scene:
 
   # downscale the image by a factor of 1,2,4,8
   data_factor: 1
+  
+  # Dense point cloud generation from ADT depth maps
+  use_dense_pointcloud: !!bool False  # Use dense point cloud from ADT depth maps
+  dense_skip_pixels: 20  # Skip every N pixels when generating dense point cloud
+  dense_downsample_images: 10  # Use every Nth frame for point cloud generation
+  dense_max_frames: 100  # Maximum frames to use for dense point cloud
 
 model:
   sh_degree: 3

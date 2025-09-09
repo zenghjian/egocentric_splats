@@ -26,8 +26,11 @@ from aria_utils import (
     get_rectified_vignette_image,
     interpolate_aria_pose,
     process_frame,
+    process_depth_frame,
     project,
     read_frames_from_metadata,
+    undistort_depth,
+    AriaFrame,
 )
 from PIL import Image
 
@@ -233,6 +236,18 @@ def to_frame_json(
     h, w = (
         frame.image_size
     )  # the calibration image size might be incorrect due to API issue.
+    
+    # Fix calibration parameters if they don't match the actual image size
+    calib_w, calib_h = frame.camera.get_image_size()
+    if calib_w != w or calib_h != h:
+        # Scale the calibration parameters to match actual image size
+        scale_x = w / calib_w
+        scale_y = h / calib_h
+        fx = fx * scale_x
+        fy = fy * scale_y
+        cx = cx * scale_x
+        cy = cy * scale_y
+        # print(f"Scaling calibration from {calib_w}x{calib_h} to {w}x{h} (scale: {scale_x:.3f})")
 
     camera_name = frame.camera.get_label()
 
@@ -470,11 +485,15 @@ def run_single_sequence(
     # Generate the per-frame depth map information
     #########################################################################################
 
-    # We will read them directly csv file which makes things easier
-    # semidense_observations = mps.read_point_observations(str(semi_dense_observation_file))
-    if semi_dense_observation_file is not None:
-        df_semidense_observations = pandas.read_csv(str(semi_dense_observation_file))
+    # Load semidense observations if available
+    if semi_dense_observation_file.exists() and str(semi_dense_observation_file) != "":
+        print(f"Loading semidense observations from {semi_dense_observation_file}")
+        import pandas as pd
+        df_semidense_observations = pd.read_csv(
+            semi_dense_observation_file, compression="gzip" if semi_dense_observation_file.suffix == ".gz" else None
+        )
     else:
+        print("No semidense observations file found, skipping sparse depth generation")
         df_semidense_observations = None
 
     for camera_label in camera_process_list:
@@ -620,6 +639,102 @@ def run_single_sequence(
                     rec_height,
                 )
                 rectified_frames.append(rec_frame)
+        
+        # Rectify ADT depth maps for RGB camera if available
+        if camera_label == "camera-rgb":
+            # Check for depth_images.vrs in the input root directory
+            depth_images_path = output_path.parent / "depth_images.vrs"
+            if depth_images_path.exists():
+                print(f"==> Found ADT depth maps, rectifying depth for {camera_label}")
+                
+                # Import ADT tools
+                try:
+                    from projectaria_tools.projects.adt import (
+                        AriaDigitalTwinDataProvider,
+                        AriaDigitalTwinDataPathsProvider,
+                    )
+                    from projectaria_tools.core.stream_id import StreamId
+                    
+                    # Initialize ADT provider
+                    paths_provider = AriaDigitalTwinDataPathsProvider(str(output_path.parent))
+                    data_paths = paths_provider.get_datapaths()
+                    gt_provider = AriaDigitalTwinDataProvider(data_paths)
+                    
+                    # RGB camera stream
+                    rgb_stream_id = StreamId("214-1")
+                    
+                    # Get camera calibration from ADT
+                    camera_calib = gt_provider.get_aria_camera_calibration(rgb_stream_id)
+                    
+                    # Extract fisheye624 distortion parameters
+                    distortion_params = np.array([
+                        camera_calib.get_projection_params()[3],  # k1
+                        camera_calib.get_projection_params()[4],  # k2
+                        camera_calib.get_projection_params()[5],  # k3
+                        camera_calib.get_projection_params()[6],  # k4
+                        camera_calib.get_projection_params()[7],  # k5
+                        camera_calib.get_projection_params()[8],  # k6
+                    ])
+                    
+                    # Process each frame's depth
+                    for i, rec_frame in enumerate(tqdm(rectified_frames, desc="Rectifying depth maps")):
+                        timestamp_ns = int(rec_frame["timestamp"])
+                        
+                        # Get depth at timestamp
+                        depth_data = gt_provider.get_depth_image_by_timestamp_ns(
+                            timestamp_ns, rgb_stream_id
+                        )
+                        
+                        if depth_data is None or not depth_data.is_valid:
+                            continue
+                        
+                        # Convert to meters
+                        depth_mm = depth_data.data().to_numpy_array()
+                        depth_m = depth_mm.astype(np.float32) / 1000.0
+                        
+                        # Create AriaFrame for depth rectification
+                        depth_frame = AriaFrame(
+                            fx=camera_calib.get_projection_params()[0],
+                            fy=camera_calib.get_projection_params()[0],  # Assume fx = fy
+                            cx=camera_calib.get_projection_params()[1],
+                            cy=camera_calib.get_projection_params()[2],
+                            distortion_params=distortion_params,
+                            w=camera_calib.get_image_size()[0],
+                            h=camera_calib.get_image_size()[1],
+                            file_path="",
+                            camera_modality="camera-rgb",
+                            camera2device=np.eye(4),
+                            transform_matrix=np.array(rec_frame["transform_matrix"]),
+                            transform_matrix_read_start=None,
+                            transform_matrix_read_end=None,
+                            timestamp=timestamp_ns,
+                            timestamp_read_start=rec_frame.get("timestamp_read_start", timestamp_ns),
+                            timestamp_read_end=rec_frame.get("timestamp_read_end", timestamp_ns),
+                            exposure_duration_s=0,
+                            gain=0,
+                            camera_name="camera-rgb"
+                        )
+                        
+                        # Process depth frame with same parameters as RGB
+                        depth_info = process_depth_frame(
+                            depth_frame,
+                            depth_m,
+                            rectified_image_folder,
+                            rectified_camera_model,
+                            rec_focal,
+                            rec_height,
+                            rec_frame["w"]  # Use same width as rectified RGB
+                        )
+                        
+                        # Add depth info to frame
+                        rec_frame.update(depth_info)
+                    
+                    print(f"==> Rectified depth maps saved to {rectified_image_folder / 'depth_maps'}")
+                    
+                except ImportError:
+                    print("Warning: ADT tools not available, skipping depth rectification")
+            else:
+                print(f"No ADT depth maps found at {depth_images_path}")
 
         # Generate sparse depth map for SLAM camera stream using semi-dense point cloud and tracker information
         if (

@@ -41,6 +41,7 @@ from utils.render_utils import apply_turbo_colormap, depth_to_normal
 from viewer.train_viewer import TrainerViewer3DGS
 
 from .loss import calculate_inverse_depth_loss, ImageLoss
+from .dense_depth_loss import calculate_dense_depth_loss, combine_depth_losses
 
 
 class SceneSplats:
@@ -1106,8 +1107,13 @@ class VanillaGSplat(L.LightningModule):
         for loss_type in train_losses_categories:
             logs[f"train/{camera_name}/{loss_type}"] = image_losses[loss_type]
 
+        # Handle depth supervision (sparse and/or dense)
+        total_depth_loss = 0
+        
+        # Sparse depth loss (existing)
+        sparse_depth_loss = None
         if self.cfg.opt.depth_loss:
-            depthloss = calculate_inverse_depth_loss(
+            sparse_depth_loss = calculate_inverse_depth_loss(
                 render_depth=renders["depth"] / self.scene_scale,
                 sparse_point2d=batch["sparse_point2d"].to(self.device),
                 sparse_inv_depth=batch["sparse_inv_depth"].to(self.device),
@@ -1118,8 +1124,53 @@ class VanillaGSplat(L.LightningModule):
                 huber_delta=0.5,
             )
             depth_lambda = self.cfg.opt.depth_lambda
-            loss += depth_lambda * depthloss["huber"]
-            logs["train/depth_loss_huber"] = depthloss
+            total_depth_loss += depth_lambda * sparse_depth_loss["huber"]
+            logs["train/sparse_depth_loss_huber"] = sparse_depth_loss["huber"]
+        
+        # Dense depth loss (new)
+        dense_depth_loss = None
+        if self.cfg.opt.use_dense_depth and "dense_depth" in batch:
+            dense_depth = batch["dense_depth"].to(self.device)
+            dense_depth_mask = batch.get("dense_depth_mask", None)
+            if dense_depth_mask is not None:
+                dense_depth_mask = dense_depth_mask.to(self.device)
+            
+            dense_depth_loss = calculate_dense_depth_loss(
+                render_depth=renders["depth"] / self.scene_scale,
+                gt_depth=dense_depth,
+                valid_mask=dense_depth_mask,
+                loss_type=self.cfg.opt.dense_depth_loss_type,
+                use_inverse_depth=self.cfg.opt.use_inverse_depth,
+            )
+            
+            dense_lambda = self.cfg.opt.dense_depth_lambda
+            # Use the primary loss type from dense_depth_loss
+            loss_key = self.cfg.opt.dense_depth_loss_type
+            if loss_key == "combined":
+                loss_key = "huber"  # Use huber as primary for combined
+            
+            if loss_key in dense_depth_loss:
+                total_depth_loss += dense_lambda * dense_depth_loss[loss_key]
+                logs[f"train/dense_depth_loss_{loss_key}"] = dense_depth_loss[loss_key]
+            
+            # Log additional metrics
+            for key, value in dense_depth_loss.items():
+                if key != loss_key:
+                    logs[f"train/dense_depth_{key}"] = value
+        
+        # Combine depth losses if configured
+        if self.cfg.opt.combine_depth_supervision and sparse_depth_loss and dense_depth_loss:
+            combined_losses = combine_depth_losses(
+                sparse_loss=sparse_depth_loss,
+                dense_loss=dense_depth_loss,
+                sparse_weight=self.cfg.opt.depth_lambda,
+                dense_weight=self.cfg.opt.dense_depth_lambda,
+            )
+            total_depth_loss = combined_losses["total_depth_loss"]
+            for key, value in combined_losses.items():
+                logs[f"train/{key}"] = value
+        
+        loss += total_depth_loss
 
         if self.cfg.opt.opacity_reg > 0:
             loss_opacity_reg = torch.abs(self.splats.activated_opacities).mean()

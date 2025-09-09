@@ -136,6 +136,17 @@ depth_loss: !!bool False
 # Weight for depth loss
 depth_lambda: 2e-4
 
+# Enable dense depth supervision from ADT
+use_dense_depth: !!bool False
+# Weight for dense depth loss
+dense_depth_lambda: 1.0
+# Type of dense depth loss: "l1", "l2", "huber", or "combined"
+dense_depth_loss_type: "huber"
+# Use inverse depth space for loss computation
+use_inverse_depth: !!bool True
+# Combine sparse and dense depth supervision
+combine_depth_supervision: !!bool False
+
 ###################################################################
 ## The following parameters currently are only used for 2d-gs
 ###################################################################

@@ -627,6 +627,50 @@ class Camera:
 
         if len(u) > 0:
             self._sparse_points = torch.stack([u, v, z, invd_std, d_std], dim=1)
+    
+    def load_dense_depth(self):
+        """
+        Load rectified depth map from depth_maps folder if available.
+        Returns depth map and valid mask.
+        """
+        if self.dense_depth_path is None:
+            return None, None
+        
+        if self.dense_depth_map is not None:
+            # Already loaded, return cached version
+            return self.dense_depth_map, self.dense_depth_mask
+        
+        # Load from depth_maps folder
+        try:
+            import numpy as np
+            
+            # Construct depth file path based on timestamp
+            # Expected format: depth_maps/depth_{timestamp}.npy
+            if isinstance(self.dense_depth_path, Path):
+                depth_maps_folder = self.dense_depth_path
+            else:
+                depth_maps_folder = Path(self.dense_depth_path)
+            
+            depth_file = depth_maps_folder / f"depth_{self._timestamp_ns}.npy"
+            
+            if depth_file.exists():
+                # Load depth map
+                depth_map = np.load(depth_file)
+                depth_map = torch.from_numpy(depth_map).float()
+                
+                # Create valid mask (non-zero depth values)
+                valid_mask = (depth_map > 0.1) & (depth_map < 100.0)  # Valid range: 0.1-100m
+                
+                # Cache the loaded depth
+                self.dense_depth_map = depth_map
+                self.dense_depth_mask = valid_mask
+                
+                return depth_map, valid_mask
+            
+        except Exception as e:
+            print(f"Failed to load dense depth: {e}")
+        
+        return None, None
 
     @property
     def render_image(self):
@@ -751,6 +795,7 @@ class AriaCamera(Camera):
         mask_path: str = None,
         rolling_shutter_index_image_path: Path = None,
         sparse_depth_path: Path = None,
+        dense_depth_path: Path = None,  # ADT dense depth map path
         camera_projection_model: Literal["linear", "spherical"] = "linear",
         exposure_duration_s: float = 1.0,
         gain: float = 1.0,
@@ -798,6 +843,11 @@ class AriaCamera(Camera):
         else:
             # we will use an imaginary value if this does not exist!
             sampled_pixel_offset = 1.0
+        
+        # Store dense depth path for later loading
+        self.dense_depth_path = dense_depth_path
+        self.dense_depth_map = None
+        self.dense_depth_mask = None
 
         if camera_name in ["camera-rgb", "camera_rgb"]:  # rolling shutter camera
             assert is_rolling_shutter, f"{camera_name} should be a rolling shutter camera!"
@@ -1164,6 +1214,14 @@ class CameraDataset(Dataset):
                 output["sparse_point2d"] = cam.sparse_point2d
                 output["sparse_inv_depth"] = cam.sparse_inv_depth
                 output["sparse_inv_distance_std"] = cam.sparse_point_inv_distance_std
+            
+            # Load dense depth if available (for AriaCamera with ADT data)
+            if hasattr(cam, 'load_dense_depth'):
+                dense_depth, dense_depth_mask = cam.load_dense_depth()
+                if dense_depth is not None:
+                    output["dense_depth"] = dense_depth
+                    if dense_depth_mask is not None:
+                        output["dense_depth_mask"] = dense_depth_mask
 
             if mask is not None:
                 output["mask"] = mask

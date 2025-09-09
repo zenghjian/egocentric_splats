@@ -6,9 +6,17 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
-DATA_INPUT_DIR=data/aria_scenes/livingroom
-DATA_PROCESSED_DIR=data/aria_scenes/livingroom
-VRS_FILE=recording.vrs
+# DATA_INPUT_DIR=data/aria_scenes/livingroom
+# DATA_PROCESSED_DIR=data/aria_scenes/livingroom
+# VRS_FILE=recording.vrs
+
+# DATA_INPUT_DIR=data/Apartment_release_golden_skeleton_seq100_10s_sample_M1292
+# DATA_PROCESSED_DIR=data/Apartment_release_golden_skeleton_seq100_10s_sample_M1292
+DATA_INPUT_DIR=data/Apartment_release_clean_seq131_M1292
+DATA_PROCESSED_DIR=data/Apartment_release_clean_seq131_M1292
+
+VRS_FILE=synthetic_video.vrs
+
 
 # MPS folder
 MPS_FOLDER=$DATA_INPUT_DIR/mps/slam
@@ -30,14 +38,14 @@ python scripts/extract_aria_vrs.py \
     --input_root $DATA_INPUT_DIR \
     --output_root $DATA_PROCESSED_DIR \
     --vrs_file $VRS_FILE \
-    --rectified_rgb_focal 1200 \
-    --rectified_rgb_size 2400 \
+    --rectified_rgb_focal 600 \
+    --rectified_rgb_size 1000 \
     --rectified_monochrome_focal 180 --rectified_monochrome_height 480 \
     --online_calib_file $MPS_FOLDER/online_calibration.jsonl \
     --trajectory_file $MPS_FOLDER/closed_loop_trajectory.csv \
     --semi_dense_points_file $MPS_FOLDER/semidense_points.csv.gz \
     --semi_dense_observation_file $MPS_FOLDER/semidense_observations.csv.gz \
-    --visualize
+    # --visualize
     # --extract_fisheye
     # --use_factory_calib
     

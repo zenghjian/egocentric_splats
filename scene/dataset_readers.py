@@ -448,6 +448,10 @@ def read_Aria_transform_json(
             sparse_depth_path = input_folder / frame["sparse_depth"]
         else:
             sparse_depth_path = None
+        
+        # Check if depth_maps folder exists for dense depth
+        depth_maps_folder = input_folder / "depth_maps"
+        dense_depth_path = depth_maps_folder if depth_maps_folder.exists() else None
 
         cam = AriaCamera(
             uid=idx,
@@ -468,6 +472,7 @@ def read_Aria_transform_json(
             image_path=image_path_full,
             mask_path=mask_path_full,
             sparse_depth_path=sparse_depth_path,
+            dense_depth_path=dense_depth_path,
             camera_projection_model=transforms["camera_model"],
             exposure_duration_s=frame["exposure_duration_s"],
             gain=frame["gain"],
@@ -674,25 +679,60 @@ def readAriaSceneInfo(
 
     scene_scale = estimate_scene_camera_scale(all_cam_list)
 
-    # Get the real path if the input is a symbolic path
-    points_path = (input_folder / "semidense_points.csv.gz").resolve()
+    # Try to use dense point cloud from depth maps if available, otherwise fall back to sparse
+    # Check if scene_cfg has the attribute (it's a config object, not a dict)
+    use_dense_pointcloud = getattr(scene_cfg, "use_dense_pointcloud", False)
+    depth_maps_folder = input_folder / "depth_maps"
+    
+    if use_dense_pointcloud and depth_maps_folder.exists():
+        print(f"Generating dense point cloud from rectified depth maps in {depth_maps_folder}")
+        # Generate dense point cloud from rectified depth maps
+        from utils.depth_maps_to_pointcloud import generate_pointcloud_from_depth_maps
+        
+        points_world, colors = generate_pointcloud_from_depth_maps(
+            depth_maps_folder=depth_maps_folder,
+            transforms_json_path=input_folder / "transforms_with_sparse_depth.json",
+            skip_n_pixels=getattr(scene_cfg, "dense_skip_pixels", 20),
+            downsample_images=getattr(scene_cfg, "dense_downsample_images", 10),
+            max_frames=getattr(scene_cfg, "dense_max_frames", 100),
+        )
+        
+        # Set points_path to None since we're not saving to file
+        points_path = None
+    else:
+        # Fall back to sparse point cloud
+        print("Using sparse SLAM point cloud")
+        # Get the real path if the input is a symbolic path
+        points_path = (input_folder / "semidense_points.csv.gz").resolve()
+        
+        if not points_path.exists():
+            print(f"Warning: No point cloud found at {points_path}")
+            # Create minimal point cloud to avoid crash
+            points_world = np.random.randn(100, 3) * 5  # Random points
+            colors = None
+        else:
+            # read pointcloud
+            points = mps.read_global_point_cloud(str(points_path))
+            # filter the point cloud by inverse depth and depth
+            filtered_points = []
+            for point in points:
+                if point.inverse_distance_std < 0.01 and point.distance_std < 0.02:
+                    filtered_points.append(point)
+            
+            # example: get position of this point in the world coordinate frame
+            points_world = []
+            colors = None  # Sparse points don't have color
+            for point in filtered_points:
+                position_world = point.position_world
+                points_world.append(position_world)
 
-    # read pointcloud
-    points = mps.read_global_point_cloud(str(points_path))
-    # filter the point cloud by inverse depth and depth
-    filtered_points = []
-    for point in points:
-        if point.inverse_distance_std < 0.01 and point.distance_std < 0.02:
-            filtered_points.append(point)
-
-    # example: get position of this point in the world coordinate frame
-    points_world = []
-    for point in filtered_points:
-        position_world = point.position_world
-        points_world.append(position_world)
-
-    xyz = np.stack(points_world, axis=0)
-    point_cloud = BasicPointCloud(points=xyz, colors=None, normals=None)
+    # Handle both dense and sparse point cloud formats
+    if isinstance(points_world, np.ndarray):
+        xyz = points_world  # Already in the right format for dense
+    else:
+        xyz = np.stack(points_world, axis=0)  # Convert list to array for sparse
+    
+    point_cloud = BasicPointCloud(points=xyz, colors=colors, normals=None)
 
     if visualize:
         visualize_cameras(train_camera_infos, point_cloud)
