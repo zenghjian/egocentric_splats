@@ -235,6 +235,43 @@ def get_skeleton_for_device(skeleton_assoc: Dict, device_serial: str) -> Optiona
             return meta['SkeletonName']
     return None
 
+def get_dynamic_objects(adt_provider: AriaDigitalTwinDataProvider) -> List[Tuple[int, str, str]]:
+    """
+    Get dynamic objects from the ADT provider following GIMO_ADT logic.
+    
+    Returns:
+        List of (object_id, object_name, motion_type) tuples
+    """
+    dynamic_objects = []
+    all_objects = []
+    
+    # Get all instance IDs
+    instance_ids = adt_provider.get_instance_ids()
+    print(f"   - Found {len(instance_ids)} total instances in sequence")
+    
+    # Check each instance to find dynamic objects
+    for instance_id in instance_ids:
+        try:
+            instance_info = adt_provider.get_instance_info_by_id(instance_id)
+            
+            # Store all objects for fallback
+            all_objects.append((instance_id, instance_info.name, str(instance_info.motion_type)))
+            
+            # Check if this is a dynamic object
+            if instance_info.motion_type == MotionType.DYNAMIC:
+                dynamic_objects.append((instance_id, instance_info.name, "DYNAMIC"))
+        except Exception as e:
+            print(f"   - Error processing instance {instance_id}: {e}")
+            continue
+    
+    # If no dynamic objects found, fall back to using all objects
+    if not dynamic_objects:
+        print("   - No dynamic objects found, using all objects as fallback")
+        dynamic_objects = all_objects[:50]  # Limit to 50 objects
+    
+    print(f"   - Found {len(dynamic_objects)} objects to track")
+    return dynamic_objects
+
 def get_hand_positions_at_timestamp(skeleton_provider: Optional[AriaDigitalTwinSkeletonProvider],
                                    target_timestamp_ns: int) -> Dict:
     """
@@ -663,7 +700,6 @@ def main():
             
             # Get dynamic objects
             print("\n4. Identifying dynamic objects...")
-            from create_adt_annotation_with_provider import get_dynamic_objects
             dynamic_objects = get_dynamic_objects(adt_provider)
             
             # Track each object with hand detection
