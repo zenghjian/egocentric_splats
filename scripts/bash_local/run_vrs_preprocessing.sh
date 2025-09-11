@@ -10,10 +10,13 @@
 # DATA_PROCESSED_DIR=data/aria_scenes/livingroom
 # VRS_FILE=recording.vrs
 
-# DATA_INPUT_DIR=data/Apartment_release_golden_skeleton_seq100_10s_sample_M1292
-# DATA_PROCESSED_DIR=data/Apartment_release_golden_skeleton_seq100_10s_sample_M1292
-DATA_INPUT_DIR=data/Apartment_release_clean_seq131_M1292
-DATA_PROCESSED_DIR=data/Apartment_release_clean_seq131_M1292
+DATA_INPUT_DIR=data/Apartment_release_golden_skeleton_seq100_10s_sample_M1292
+DATA_PROCESSED_DIR=data/Apartment_release_golden_skeleton_seq100_10s_sample_M1292
+# DATA_INPUT_DIR=data/Apartment_release_clean_seq131_M1292
+# DATA_PROCESSED_DIR=data/Apartment_release_clean_seq131_M1292
+
+# DATA_INPUT_DIR=data/Apartment_release_decoration_skeleton_seq131_M1292
+# DATA_PROCESSED_DIR=data/Apartment_release_decoration_skeleton_seq131_M1292
 
 VRS_FILE=synthetic_video.vrs
 
@@ -45,6 +48,7 @@ python scripts/extract_aria_vrs.py \
     --trajectory_file $MPS_FOLDER/closed_loop_trajectory.csv \
     --semi_dense_points_file $MPS_FOLDER/semidense_points.csv.gz \
     --semi_dense_observation_file $MPS_FOLDER/semidense_observations.csv.gz \
+    --filter_dynamic_objects \
     # --visualize
     # --extract_fisheye
     # --use_factory_calib

@@ -12,6 +12,7 @@ from pathlib import Path
 import cv2
 
 import numpy as np
+from pandas.core.missing import F
 import projectaria_tools.core.mps as mps
 from PIL import Image
 
@@ -434,7 +435,7 @@ def process_depth_frame(
     np.save(depth_output_path, depth.astype(np.float32))
     
     # Also save as visualization image (optional)
-    if True:  # Set to True to save depth visualization
+    if False:  # Set to True to save depth visualization
         # Normalize depth for visualization (clip to reasonable range)
         depth_vis = depth.copy()
         valid_mask = depth_vis > 0

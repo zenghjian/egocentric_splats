@@ -652,6 +652,7 @@ def run_single_sequence(
                     from projectaria_tools.projects.adt import (
                         AriaDigitalTwinDataProvider,
                         AriaDigitalTwinDataPathsProvider,
+                        MotionType,
                     )
                     from projectaria_tools.core.stream_id import StreamId
                     
@@ -659,6 +660,39 @@ def run_single_sequence(
                     paths_provider = AriaDigitalTwinDataPathsProvider(str(output_path.parent))
                     data_paths = paths_provider.get_datapaths()
                     gt_provider = AriaDigitalTwinDataProvider(data_paths)
+                    
+                    # Identify static instances for filtering dynamic objects (if enabled)
+                    static_instance_ids = None
+                    if options.filter_dynamic_objects:
+                        print("==> Identifying static instances for dynamic object filtering...")
+                        static_instance_ids = set()
+                        instance_ids = gt_provider.get_instance_ids()
+                        
+                        static_count = 0
+                        dynamic_count = 0
+                        dynamic_objects_info = []
+                        
+                        for instance_id in instance_ids:
+                            try:
+                                instance_info = gt_provider.get_instance_info_by_id(instance_id)
+                                
+                                # Check motion type
+                                if instance_info.motion_type == MotionType.STATIC:
+                                    static_instance_ids.add(instance_id)
+                                    static_count += 1
+                                elif instance_info.motion_type == MotionType.DYNAMIC:
+                                    dynamic_count += 1
+                                    dynamic_objects_info.append(instance_info.name)
+                                    if dynamic_count <= 5:  # Print first 5 dynamic objects
+                                        print(f"    Dynamic object: {instance_info.name} (ID: {instance_id})")
+                            except Exception as e:
+                                continue
+                        
+                        # Add background (ID 0) to static instances
+                        static_instance_ids.add(0)
+                        
+                        print(f"  Found {static_count} static instances, {dynamic_count} dynamic instances")
+                        print(f"  Will filter out dynamic objects from depth maps")
                     
                     # RGB camera stream
                     rgb_stream_id = StreamId("214-1")
@@ -691,6 +725,36 @@ def run_single_sequence(
                         # Convert to meters
                         depth_mm = depth_data.data().to_numpy_array()
                         depth_m = depth_mm.astype(np.float32) / 1000.0
+                        
+                        # Get segmentation mask for filtering dynamic objects (if enabled)
+                        if options.filter_dynamic_objects and static_instance_ids is not None:
+                            seg_data = gt_provider.get_segmentation_image_by_timestamp_ns(
+                                timestamp_ns, rgb_stream_id
+                            )
+                            
+                            if seg_data is not None and seg_data.is_valid():
+                                segmentation = seg_data.data().to_numpy_array()
+                                
+                                # Create static mask
+                                static_mask = np.zeros_like(segmentation, dtype=bool)
+                                unique_ids = np.unique(segmentation)
+                                for instance_id in unique_ids:
+                                    if instance_id in static_instance_ids:
+                                        static_mask |= (segmentation == instance_id)
+                                
+                                # Apply mask to depth - set dynamic regions to 0 (invalid depth)
+                                depth_m[~static_mask] = 0
+                                
+                                # Save the static mask for this frame
+                                mask_folder = rectified_image_folder / "static_masks"
+                                mask_folder.mkdir(exist_ok=True)
+                                mask_filename = f"{i:06d}.png"
+                                Image.fromarray((static_mask * 255).astype(np.uint8)).save(
+                                    mask_folder / mask_filename
+                                )
+                            else:
+                                # If no segmentation available, use full depth without filtering
+                                print(f"Warning: No segmentation available for frame {i}, using full depth")
                         
                         # Create AriaFrame for depth rectification
                         depth_frame = AriaFrame(
@@ -1233,6 +1297,12 @@ def main():
         type=int,
         default=9877,
         help="aws cluster ws port if used. (for aws server only)",
+    )
+    parser.add_argument(
+        "--filter_dynamic_objects",
+        action="store_true",
+        default=True,
+        help="Filter out dynamic objects from depth maps using ADT segmentation (requires ADT data)",
     )
 
     args = parser.parse_args()

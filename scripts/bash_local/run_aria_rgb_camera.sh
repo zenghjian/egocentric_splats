@@ -12,6 +12,9 @@
 # scene_name="recording/camera-rgb-rectified-1200-h2400"
 
 data_root=data/Apartment_release_golden_skeleton_seq100_10s_sample_M1292
+# scene_name="synthetic_video/camera-rgb-rectified-600-h1000"
+# data_root=data/Apartment_release_clean_seq131_M1292
+# data_root=data/Apartment_release_decoration_skeleton_seq131_M1292
 scene_name="synthetic_video/camera-rgb-rectified-600-h1000"
 output_dir="output"/$scene_name
 
