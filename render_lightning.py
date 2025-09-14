@@ -23,16 +23,43 @@ def create_video(input_folder, output_video, framerate, rotate: bool=False, qual
     framerate (int): Frames per second in the output video.
     quality (int): Constant Rate Factor (CRF) for quality (0-51, where 0 is lossless and 51 is worst quality).
     """
-    # Construct the FFmpeg command to convert images to video
+    # Get all PNG files and sort them numerically
+    import glob
+    import re
+    
+    # Get all PNG files
+    png_files = glob.glob(os.path.join(input_folder, '*.png'))
+    
+    # Sort files numerically based on the number in the filename
+    def extract_number(filepath):
+        basename = os.path.basename(filepath)
+        # Extract the number from filename (assuming format like "0.000000.png")
+        match = re.search(r'(\d+\.?\d*)', basename)
+        return float(match.group(1)) if match else 0
+    
+    png_files.sort(key=extract_number)
+    
+    # Create a temporary file list for ffmpeg
+    import tempfile
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+        list_file = f.name
+        for png_file in png_files:
+            # Convert to absolute path to avoid path resolution issues
+            abs_path = os.path.abspath(png_file)
+            f.write(f"file '{abs_path}'\n")
+    
+    # Construct the FFmpeg command to convert images to video using the file list
     command = [
         'ffmpeg', '-y',
-        '-framerate', str(framerate),  # Frames per second
-        '-pattern_type', 'glob',
-        '-i', f"'{os.path.join(input_folder, '*.png')}'",  # Input file pattern
+        '-f', 'concat',
+        '-safe', '0',
+        '-r', str(framerate),  # Input framerate
+        '-i', list_file,  # Use file list instead of glob pattern
         '-c:v', 'libx264',  # Codec video using x264
         '-preset', 'slow',  # Preset for compression (trade-off between speed and quality)
         '-crf', str(quality),  # Constant Rate Factor
         '-pix_fmt', 'yuv420p',  # Pixel format
+        '-r', str(framerate),  # Output framerate
     ]
 
     if rotate: 
@@ -43,10 +70,15 @@ def create_video(input_folder, output_video, framerate, rotate: bool=False, qual
     command.append(output_video)
     command = " ".join(command)
     print(command)
-    # Execute the command
-    os.system(command)
-
-    print(f"Generate rendering video at {output_video}")
+    
+    try:
+        # Execute the command
+        os.system(command)
+        print(f"Generate rendering video at {output_video}")
+    finally:
+        # Clean up the temporary file
+        if os.path.exists(list_file):
+            os.remove(list_file)
 
 @hydra.main(version_base=None, config_path="conf", config_name="config")
 def main(cfg : DictConfig) -> None:
