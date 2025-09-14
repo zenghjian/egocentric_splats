@@ -42,6 +42,7 @@ from viewer.train_viewer import TrainerViewer3DGS
 
 from .loss import calculate_inverse_depth_loss, ImageLoss
 from .dense_depth_loss import calculate_dense_depth_loss, combine_depth_losses
+from .loss_with_mask import l1_loss, l2_loss, psnr, compute_recon_metrics
 
 
 class SceneSplats:
@@ -485,6 +486,10 @@ class VanillaGSplat(L.LightningModule):
     ):
         super().__init__()
         self.cfg = cfg
+        
+        # Set default value for use_static_mask_loss if not provided
+        if not hasattr(self.cfg.opt, 'use_static_mask_loss'):
+            self.cfg.opt.use_static_mask_loss = False
 
         self.wandb_logging = cfg.wandb.use_wandb
 
@@ -1041,22 +1046,35 @@ class VanillaGSplat(L.LightningModule):
 
         valid_mask = train_cam.valid_mask
 
+        # Handle static/dynamic masks (EgoLifter style)
+        static_mask = None
+        dynamic_mask = None
+        
+        # Check for EgoLifter-style masks
+        if "static_mask" in batch and "dynamic_mask" in batch:
+            static_mask = batch["static_mask"].to(self.device)  # (B, 1, H, W) or (1, H, W)
+            dynamic_mask = batch["dynamic_mask"].to(self.device)
+            
+            # Remove batch dimension if present
+            if static_mask.dim() == 4:
+                static_mask = static_mask[0]
+            if dynamic_mask.dim() == 4:
+                dynamic_mask = dynamic_mask[0]
+                
+            # Use static mask as the valid mask for loss computation
+            if valid_mask is not None:
+                valid_mask = valid_mask.to(self.device) * static_mask
+            else:
+                valid_mask = static_mask
+                
+        # Legacy mask rendering mode (keep for compatibility)
         use_mask_loss = False
-        if self.cfg.scene.mask_rendering:
-            # enforce mask rendering. This will set the background to completely black.
-            # The Gaussians in the background will thus be eliminated.
-            assert (
-                "mask" in batch.keys()
-            ), "masked rendering require to have mask as input"
+        if self.cfg.scene.mask_rendering and "mask" in batch:
             mask = batch["mask"].to(self.device)  # (B, 1, H, W)
-            # currently set to a random color does not work as good as setting it to black
             bmask = (mask < 0.5).expand_as(gt_image)
             gt_image[bmask] = 0
             image[bmask] = 0
-
             use_mask_loss = True
-        else:
-            use_mask_loss = False
 
         self.num_train_rays_per_step = 3 * image_height * image_width
 
@@ -1092,9 +1110,37 @@ class VanillaGSplat(L.LightningModule):
 
         # clamp radiance value to the observed dynamic range
         image = image.clamp(0, 1)
-        image_losses = image_loss_func(
-            image, gt_image, losses=train_losses_categories, valid_mask=valid_mask
-        )
+        
+        # Choose between modified loss (with static mask) and original loss
+        using_masked_loss = False
+        if self.cfg.opt.use_static_mask_loss and static_mask is not None:
+            # Use EgoLifter-style loss computation with static mask
+            from .loss_with_mask import l1_loss, psnr
+            
+            # Compute L1 loss with static mask
+            pixel_loss = l1_loss(image, gt_image, mask=valid_mask)
+            
+            # For compatibility, create image_losses dict
+            image_losses = {
+                pixel_loss_type: pixel_loss,
+                "dssim": image_loss_func(
+                    image, gt_image, losses=["dssim"], valid_mask=valid_mask
+                )["dssim"] if "dssim" in train_losses_categories else torch.tensor(0.0),
+                "psnr": psnr(image, gt_image, mask=valid_mask)
+            }
+            
+            # Add L1 grad if needed
+            if "l1_grad" in train_losses_categories:
+                image_losses["l1_grad"] = image_loss_func(
+                    image, gt_image, losses=["l1_grad"], valid_mask=valid_mask
+                )["l1_grad"]
+            
+            using_masked_loss = True
+        else:
+            # Original loss computation (without mask consideration)
+            image_losses = image_loss_func(
+                image, gt_image, losses=train_losses_categories, valid_mask=None if not self.cfg.opt.use_static_mask_loss else valid_mask
+            )
 
         loss = (
             self.cfg.opt.pixel_lambda * image_losses[pixel_loss_type]
@@ -1106,6 +1152,10 @@ class VanillaGSplat(L.LightningModule):
         logs = {f"train/{camera_name}/image_loss_total": loss}
         for loss_type in train_losses_categories:
             logs[f"train/{camera_name}/{loss_type}"] = image_losses[loss_type]
+        
+        # Log whether we're using masked loss
+        if hasattr(self.cfg.opt, 'use_static_mask_loss'):
+            logs["train/using_masked_loss"] = torch.tensor(1.0 if using_masked_loss else 0.0)
 
         # Handle depth supervision (sparse and/or dense)
         total_depth_loss = 0

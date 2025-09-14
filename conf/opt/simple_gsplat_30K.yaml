@@ -147,6 +147,9 @@ use_inverse_depth: !!bool True
 # Combine sparse and dense depth supervision
 combine_depth_supervision: !!bool False
 
+# Use modified loss with static mask support (EgoLifter style)
+use_static_mask_loss: !!bool False
+
 ###################################################################
 ## The following parameters currently are only used for 2d-gs
 ###################################################################

@@ -426,6 +426,7 @@ def read_Aria_transform_json(
                 f"Unrecognized cameras labels {transforms['camera_label']}"
             )
 
+        # Check for mask_path in frame
         if (
             "mask_path" in frame.keys()
             and frame["mask_path"] != ""
@@ -436,6 +437,18 @@ def read_Aria_transform_json(
             mask_path_full = str(mask_path_full)
         else:
             mask_path_full = None
+        
+        # Check for segmentation data (EgoLifter style - in masks folder)
+        segmentation_path = None
+        masks_folder = input_folder / "masks"
+        if masks_folder.exists():
+            # Get timestamp from frame
+            timestamp_ns = frame.get("timestamp", idx)
+            seg_filename = f"seg_{idx:06d}.pkl.gz"
+            seg_path = masks_folder / seg_filename
+            if seg_path.exists():
+                segmentation_path = str(seg_path)
+                print(f"Found segmentation for frame {idx}: {seg_filename}") if idx == 0 else None
 
         fx, fy, cx, cy = frame["fx"], frame["fy"], frame["cx"], frame["cy"]
         width, height = frame["w"], frame["h"]
@@ -473,6 +486,7 @@ def read_Aria_transform_json(
             mask_path=mask_path_full,
             sparse_depth_path=sparse_depth_path,
             dense_depth_path=dense_depth_path,
+            segmentation_path=segmentation_path,  # Add segmentation path
             camera_projection_model=transforms["camera_model"],
             exposure_duration_s=frame["exposure_duration_s"],
             gain=frame["gain"],

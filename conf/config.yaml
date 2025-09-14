@@ -23,7 +23,7 @@ train:
 wandb:
   use_wandb: !!bool False # If false, we will turn off logging
   project: "egoDTC"
-  entity: "surreal_dtc"
+  entity: "zenghuajian97"
 
 scene:
   data_root: ""

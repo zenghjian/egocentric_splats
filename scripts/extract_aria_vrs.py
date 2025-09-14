@@ -31,6 +31,7 @@ from aria_utils import (
     read_frames_from_metadata,
     undistort_depth,
     AriaFrame,
+    filter_frames_by_quality,
 )
 from PIL import Image
 
@@ -71,6 +72,7 @@ def to_aria_image_frame(
     camera_label: str = "camera-rgb",
     use_factory_calib: bool = False,
     visualize: bool = True,
+    options=None,
 ):
     assert camera_label in ["camera-rgb", "camera-slam-left", "camera-slam-right"]
 
@@ -187,14 +189,62 @@ def to_aria_image_frame(
         )
 
     frames = []
+    aria_frames = []  # Store AriaImageFrame objects for filtering
     stream_id = provider.get_stream_id_from_label(camera_label)
 
     num_process = 1
     total_frames = provider.get_num_data(stream_id)
-    for frame_i in tqdm(range(0, total_frames, num_process)):
+    for frame_i in tqdm(range(0, total_frames, num_process), desc="Reading frames"):
         img_frame = process_raw_data(frame_i, camera_label=camera_label)
         if img_frame is None:
             continue
+        aria_frames.append(img_frame)
+    
+    # Apply frame filtering if enabled
+    if hasattr(options, 'filter_frames') and options.filter_frames:
+        print(f"\nApplying frame quality filtering for {camera_label}...")
+        # Convert AriaImageFrame to AriaFrame for filtering
+        from aria_utils import AriaFrame as FilterFrame
+        filter_frames = []
+        for af in aria_frames:
+            ff = FilterFrame(
+                fx=af.camera.get_focal_lengths()[0],
+                fy=af.camera.get_focal_lengths()[1],
+                cx=af.camera.get_principal_point()[0],
+                cy=af.camera.get_principal_point()[1],
+                distortion_params=af.camera.get_projection_params()[3:15],
+                w=af.image_size[1],
+                h=af.image_size[0],
+                file_path=af.file_path,
+                camera_modality="rgb",
+                transform_matrix=af.t_world_camera.to_matrix(),
+                camera2device=af.camera.get_transform_device_camera().to_matrix(),
+                timestamp=af.timestamp,
+                timestamp_read_start=af.timestamp_read_start,
+                timestamp_read_end=af.timestamp_read_end,
+                exposure_duration_s=af.exposure_duration_s,
+                gain=af.gain,
+                camera_name=camera_label
+            )
+            filter_frames.append(ff)
+        
+        # Filter frames
+        filtered_frames = filter_frames_by_quality(
+            filter_frames,
+            provider=provider,
+            blur_threshold=getattr(options, 'blur_threshold', 120.0),
+            trans_threshold=getattr(options, 'trans_threshold', 0.15),
+            rot_threshold=getattr(options, 'rot_threshold', 3.0),
+            max_angular_velocity=getattr(options, 'max_angular_velocity', 90.0),
+            input_root=out_dir
+        )
+        
+        # Keep only the filtered AriaImageFrames
+        filtered_timestamps = {f.timestamp for f in filtered_frames}
+        aria_frames = [af for af in aria_frames if af.timestamp in filtered_timestamps]
+    
+    # Convert to frame json
+    for img_frame in aria_frames:
         frames.append(to_frame_json(img_frame, out_dir, visualize=visualize))
 
         # The VRS file reader is not thread-safe. Will cause some issues to run in parallel
@@ -467,6 +517,7 @@ def run_single_sequence(
             camera_label=camera_label,
             visualize=options.visualize,
             use_factory_calib=options.use_factory_calib,
+            options=options,
         )
 
         ns_frames["camera_label"] = camera_label
@@ -661,38 +712,7 @@ def run_single_sequence(
                     data_paths = paths_provider.get_datapaths()
                     gt_provider = AriaDigitalTwinDataProvider(data_paths)
                     
-                    # Identify static instances for filtering dynamic objects (if enabled)
-                    static_instance_ids = None
-                    if options.filter_dynamic_objects:
-                        print("==> Identifying static instances for dynamic object filtering...")
-                        static_instance_ids = set()
-                        instance_ids = gt_provider.get_instance_ids()
-                        
-                        static_count = 0
-                        dynamic_count = 0
-                        dynamic_objects_info = []
-                        
-                        for instance_id in instance_ids:
-                            try:
-                                instance_info = gt_provider.get_instance_info_by_id(instance_id)
-                                
-                                # Check motion type
-                                if instance_info.motion_type == MotionType.STATIC:
-                                    static_instance_ids.add(instance_id)
-                                    static_count += 1
-                                elif instance_info.motion_type == MotionType.DYNAMIC:
-                                    dynamic_count += 1
-                                    dynamic_objects_info.append(instance_info.name)
-                                    if dynamic_count <= 5:  # Print first 5 dynamic objects
-                                        print(f"    Dynamic object: {instance_info.name} (ID: {instance_id})")
-                            except Exception as e:
-                                continue
-                        
-                        # Add background (ID 0) to static instances
-                        static_instance_ids.add(0)
-                        
-                        print(f"  Found {static_count} static instances, {dynamic_count} dynamic instances")
-                        print(f"  Will filter out dynamic objects from depth maps")
+
                     
                     # RGB camera stream
                     rgb_stream_id = StreamId("214-1")
@@ -710,8 +730,97 @@ def run_single_sequence(
                         camera_calib.get_projection_params()[8],  # k6
                     ])
                     
-                    # Process each frame's depth
-                    for i, rec_frame in enumerate(tqdm(rectified_frames, desc="Rectifying depth maps")):
+                    # Identify static and dynamic instances (following EgoLifter approach)
+                    print("==> Identifying static and dynamic instances...")
+                    static_instance_ids = set()
+                    dynamic_instance_ids = set()
+                    instance_ids = gt_provider.get_instance_ids()
+                    
+                    static_count = 0
+                    dynamic_count = 0
+                    dynamic_objects_info = []
+                    
+                    for instance_id in instance_ids:
+                        try:
+                            instance_info = gt_provider.get_instance_info_by_id(instance_id)
+                            
+                            # Check motion type
+                            if instance_info.motion_type == MotionType.STATIC:
+                                static_instance_ids.add(instance_id)
+                                static_count += 1
+                            elif instance_info.motion_type == MotionType.DYNAMIC:
+                                dynamic_instance_ids.add(instance_id)
+                                dynamic_count += 1
+                                dynamic_objects_info.append(instance_info.name)
+                                if dynamic_count <= 5:  # Print first 5 dynamic objects
+                                    print(f"    Dynamic object: {instance_info.name} (ID: {instance_id})")
+                        except Exception as e:
+                            continue
+                    
+                    # Add background (ID 0) to static instances
+                    static_instance_ids.add(0)
+                    
+                    print(f"  Found {static_count} static instances, {dynamic_count} dynamic instances")
+                    
+                    # Save instance IDs to a JSON file for later use (EgoLifter style)
+                    instance_info_path = rectified_image_folder / "instance_info.json"
+                    instance_info = {
+                        "static_ids": list(static_instance_ids),
+                        "dynamic_ids": list(dynamic_instance_ids),
+                        "static_count": static_count,
+                        "dynamic_count": dynamic_count
+                    }
+                    with open(instance_info_path, 'w') as f:
+                        json.dump(instance_info, f, indent=2)
+                    print(f"  Saved instance info to {instance_info_path}")
+                    
+                    # Pre-create calibration objects for reuse (avoid thread safety issues)
+                    from projectaria_tools.core import calibration as calib_module
+                    from projectaria_tools.core.sophus import SE3
+                    
+                    # Create frame calibration
+                    proj_params_base = np.asarray([
+                        camera_calib.get_projection_params()[0],  # fx
+                        camera_calib.get_projection_params()[1],  # cx
+                        camera_calib.get_projection_params()[2],  # cy
+                    ])
+                    proj_params_full = np.concatenate((proj_params_base, distortion_params))
+                    
+                    base_frame_calib = calib_module.CameraCalibration(
+                        "camera-rgb",
+                        calib_module.CameraModelType.FISHEYE624,
+                        proj_params_full,
+                        SE3(),
+                        camera_calib.get_image_size()[0],
+                        camera_calib.get_image_size()[1],
+                        None,
+                        90.0,
+                        "",
+                    )
+                    
+                    # Create output calibration
+                    if rectified_camera_model == "linear":
+                        base_out_calib = calib_module.get_linear_camera_calibration(
+                            rectified_frames[0]["w"] if rectified_frames else 1000, 
+                            rec_height, 
+                            rec_focal
+                        )
+                    elif rectified_camera_model == "spherical":
+                        base_out_calib = calib_module.get_spherical_camera_calibration(
+                            rectified_frames[0]["w"] if rectified_frames else 1000, 
+                            rec_height, 
+                            rec_focal
+                        )
+                    else:
+                        base_out_calib = calib_module.get_linear_camera_calibration(
+                            rectified_frames[0]["w"] if rectified_frames else 1000, 
+                            rec_height, 
+                            rec_focal
+                        )
+                    
+                    # Define helper function for processing single depth frame
+                    def process_single_depth_frame(args):
+                        i, rec_frame = args
                         timestamp_ns = int(rec_frame["timestamp"])
                         
                         # Get depth at timestamp
@@ -719,15 +828,17 @@ def run_single_sequence(
                             timestamp_ns, rgb_stream_id
                         )
                         
-                        if depth_data is None or not depth_data.is_valid:
-                            continue
+                        if depth_data is None or not depth_data.is_valid():
+                            return i, None
                         
                         # Convert to meters
                         depth_mm = depth_data.data().to_numpy_array()
                         depth_m = depth_mm.astype(np.float32) / 1000.0
                         
-                        # Get segmentation mask for filtering dynamic objects (if enabled)
-                        if options.filter_dynamic_objects and static_instance_ids is not None:
+                        # Always save segmentation mask (EgoLifter approach)
+                        # We save the raw segmentation, not filtered
+                        segmentation_data = None
+                        if True:  # Always process segmentation when available
                             seg_data = gt_provider.get_segmentation_image_by_timestamp_ns(
                                 timestamp_ns, rgb_stream_id
                             )
@@ -742,19 +853,47 @@ def run_single_sequence(
                                     if instance_id in static_instance_ids:
                                         static_mask |= (segmentation == instance_id)
                                 
-                                # Apply mask to depth - set dynamic regions to 0 (invalid depth)
-                                depth_m[~static_mask] = 0
+                                # EgoLifter approach: Save raw segmentation, don't modify depth
+                                # The mask will be applied during training as loss weights
                                 
-                                # Save the static mask for this frame
-                                mask_folder = rectified_image_folder / "static_masks"
-                                mask_folder.mkdir(exist_ok=True)
-                                mask_filename = f"{i:06d}.png"
-                                Image.fromarray((static_mask * 255).astype(np.uint8)).save(
-                                    mask_folder / mask_filename
+                                # Save segmentation data (exactly like EgoLifter)
+                                # 1. Save raw segmentation data
+                                seg_folder = rectified_image_folder / "masks"  # Use "masks" like EgoLifter
+                                seg_folder.mkdir(exist_ok=True)
+                                seg_filename = f"seg_{i:06d}.pkl.gz"
+                                import pickle
+                                import gzip
+                                
+                                # Rectify segmentation with label-preserving distortion
+                                # Use pre-created calibration objects to avoid thread safety issues
+                                rectified_seg = calib_module.distort_label_by_calibration(
+                                    segmentation, base_out_calib, base_frame_calib
                                 )
+                                
+                                with gzip.open(seg_folder / seg_filename, 'wb') as f:
+                                    pickle.dump(rectified_seg, f)
+                                
+                                # 2. Save segmentation visualization (like EgoLifter)
+                                seg_viz_folder = rectified_image_folder / "masks_viz"
+                                seg_viz_folder.mkdir(exist_ok=True)
+                                seg_viz_filename = f"seg_{i:06d}.jpg"
+                                
+                                # Get visualization of segmentation
+                                if seg_data is not None and seg_data.is_valid():
+                                    # Get the visualizable version from ADT
+                                    seg_viz = seg_data.data().get_visualizable().to_numpy_array()
+                                    # Rectify the visualization
+                                    # Use pre-created calibration objects
+                                    rectified_seg_viz = calib_module.distort_label_by_calibration(
+                                        seg_viz, base_out_calib, base_frame_calib
+                                    )
+                                    # Save as JPEG
+                                    Image.fromarray(rectified_seg_viz).save(
+                                        seg_viz_folder / seg_viz_filename
+                                    )
                             else:
                                 # If no segmentation available, use full depth without filtering
-                                print(f"Warning: No segmentation available for frame {i}, using full depth")
+                                pass  # Silent for parallel processing
                         
                         # Create AriaFrame for depth rectification
                         depth_frame = AriaFrame(
@@ -780,6 +919,7 @@ def run_single_sequence(
                         )
                         
                         # Process depth frame with same parameters as RGB
+                        # Pass calibration objects to avoid recreation in parallel processing
                         depth_info = process_depth_frame(
                             depth_frame,
                             depth_m,
@@ -787,14 +927,42 @@ def run_single_sequence(
                             rectified_camera_model,
                             rec_focal,
                             rec_height,
-                            rec_frame["w"]  # Use same width as rectified RGB
+                            rec_frame["w"],  # Use same width as rectified RGB
+                            frame_calib=base_frame_calib,
+                            out_calib=base_out_calib
                         )
                         
-                        # Add depth info to frame
-                        rec_frame.update(depth_info)
+                        return i, depth_info
+                    
+                    # Process depth frames in parallel
+                    if parallel_process:
+                        print("Parallel processing depth maps...")
+                        num_depth_process = 24
+                        for batch_i in tqdm(range(0, len(rectified_frames), num_depth_process), desc="Rectifying depth maps"):
+                            num_process_to_launch = min(len(rectified_frames) - batch_i, num_depth_process)
+                            with ThreadPoolExecutor(max_workers=num_depth_process) as e:
+                                futures = [
+                                    e.submit(
+                                        process_single_depth_frame,
+                                        (batch_i + j, rectified_frames[batch_i + j])
+                                    )
+                                    for j in range(num_process_to_launch)
+                                ]
+                                results = [future.result() for future in futures]
+                                
+                                # Update rectified_frames with depth info
+                                for idx, depth_info in results:
+                                    if depth_info is not None:
+                                        rectified_frames[idx].update(depth_info)
+                    else:
+                        # Sequential processing
+                        for i, rec_frame in enumerate(tqdm(rectified_frames, desc="Rectifying depth maps")):
+                            idx, depth_info = process_single_depth_frame((i, rec_frame))
+                            if depth_info is not None:
+                                rec_frame.update(depth_info)
                     
                     print(f"==> Rectified depth maps saved to {rectified_image_folder / 'depth_maps'}")
-                    
+                        
                 except ImportError:
                     print("Warning: ADT tools not available, skipping depth rectification")
             else:
@@ -1303,6 +1471,38 @@ def main():
         action="store_true",
         default=True,
         help="Filter out dynamic objects from depth maps using ADT segmentation (requires ADT data)",
+    )
+    
+    # Frame filtering arguments
+    parser.add_argument(
+        "--filter_frames",
+        action="store_true",
+        default=False,
+        help="Enable frame quality filtering based on blur, IMU, and pose increments",
+    )
+    parser.add_argument(
+        "--blur_threshold",
+        type=float,
+        default=120.0,
+        help="Minimum Laplacian variance for sharp images (default: 120)",
+    )
+    parser.add_argument(
+        "--trans_threshold",
+        type=float,
+        default=0.15,
+        help="Minimum translation in meters between frames (default: 0.15m)",
+    )
+    parser.add_argument(
+        "--rot_threshold",
+        type=float,
+        default=3.0,
+        help="Minimum rotation in degrees between frames (default: 3°)",
+    )
+    parser.add_argument(
+        "--max_angular_velocity",
+        type=float,
+        default=90.0,
+        help="Maximum angular velocity in deg/s to filter fast rotations (default: 90°/s)",
     )
 
     args = parser.parse_args()

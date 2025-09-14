@@ -554,6 +554,12 @@ class Camera:
         # If there is an additional mask associated with it to further crop the ROI
         if alpha_mask is None and self._mask_path is not None:
             alpha_mask = Image.open(self._mask_path)
+            # Mask should already be rectified to correct size
+            # If size mismatch, it's likely an error in the pipeline
+            if alpha_mask.size != (self.image_width, self.image_height):
+                print(f"Warning: Mask size {alpha_mask.size} doesn't match image size ({self.image_width}, {self.image_height})")
+                # Fallback to resize as emergency measure
+                alpha_mask = alpha_mask.resize((self.image_width, self.image_height), Image.NEAREST)
             alpha_mask = PILtoTorch(alpha_mask).squeeze()
 
         if self.cache_image:
@@ -627,6 +633,56 @@ class Camera:
 
         if len(u) > 0:
             self._sparse_points = torch.stack([u, v, z, invd_std, d_std], dim=1)
+    
+    def load_segmentation(self, static_ids=None, dynamic_ids=None):
+        """
+        Load segmentation data and generate static/dynamic masks (EgoLifter style).
+        
+        Args:
+            static_ids: List of instance IDs that are static
+            dynamic_ids: List of instance IDs that are dynamic
+            
+        Returns:
+            Tuple of (static_mask, dynamic_mask, segmentation_data)
+        """
+        if self.segmentation_path is None:
+            return None, None, None
+            
+        try:
+            import pickle
+            import gzip
+            import numpy as np
+            
+            # Load segmentation data from pickle file
+            with gzip.open(self.segmentation_path, 'rb') as f:
+                segmentation_data = pickle.load(f)
+            
+            # Convert to tensor
+            segmentation_data = torch.from_numpy(segmentation_data.astype(np.int64))
+            
+            # Generate masks if IDs are provided
+            static_mask = None
+            dynamic_mask = None
+            
+            if static_ids is not None:
+                # Create static mask (use bool type for bitwise operations)
+                static_mask = torch.zeros_like(segmentation_data, dtype=torch.bool)
+                for instance_id in static_ids:
+                    static_mask |= (segmentation_data == instance_id)
+                static_mask = static_mask.float().unsqueeze(0)  # Convert to float and add channel dimension
+            
+            if dynamic_ids is not None:
+                # Create dynamic mask (use bool type for bitwise operations)
+                dynamic_mask = torch.zeros_like(segmentation_data, dtype=torch.bool)
+                for instance_id in dynamic_ids:
+                    dynamic_mask |= (segmentation_data == instance_id)
+                dynamic_mask = dynamic_mask.float().unsqueeze(0)  # Convert to float and add channel dimension
+            
+            return static_mask, dynamic_mask, segmentation_data
+            
+        except Exception as e:
+            print(f"Warning: Failed to load segmentation from {self.segmentation_path}: {e}")
+            return None, None, None
     
     def load_dense_depth(self):
         """
@@ -796,6 +852,7 @@ class AriaCamera(Camera):
         rolling_shutter_index_image_path: Path = None,
         sparse_depth_path: Path = None,
         dense_depth_path: Path = None,  # ADT dense depth map path
+        segmentation_path: str = None,  # EgoLifter-style segmentation path
         camera_projection_model: Literal["linear", "spherical"] = "linear",
         exposure_duration_s: float = 1.0,
         gain: float = 1.0,
@@ -848,6 +905,10 @@ class AriaCamera(Camera):
         self.dense_depth_path = dense_depth_path
         self.dense_depth_map = None
         self.dense_depth_mask = None
+        
+        # Store segmentation path for later loading (EgoLifter style)
+        self.segmentation_path = segmentation_path
+        self.segmentation_data = None
 
         if camera_name in ["camera-rgb", "camera_rgb"]:  # rolling shutter camera
             assert is_rolling_shutter, f"{camera_name} should be a rolling shutter camera!"
@@ -1225,6 +1286,30 @@ class CameraDataset(Dataset):
 
             if mask is not None:
                 output["mask"] = mask
+            
+            # Load segmentation and generate static/dynamic masks (EgoLifter style)
+            if hasattr(cam, 'segmentation_path') and cam.segmentation_path is not None:
+                # Try to load instance info if available
+                instance_info_path = Path(cam.segmentation_path).parent.parent / "instance_info.json"
+                static_ids = None
+                dynamic_ids = None
+                
+                if instance_info_path.exists():
+                    import json
+                    with open(instance_info_path, 'r') as f:
+                        instance_info = json.load(f)
+                        static_ids = instance_info.get("static_ids", None)
+                        dynamic_ids = instance_info.get("dynamic_ids", None)
+                
+                # Load segmentation and generate masks
+                static_mask, dynamic_mask, seg_data = cam.load_segmentation(static_ids, dynamic_ids)
+                
+                if static_mask is not None:
+                    output["static_mask"] = static_mask
+                if dynamic_mask is not None:
+                    output["dynamic_mask"] = dynamic_mask
+                if seg_data is not None:
+                    output["segmentation"] = seg_data
 
         return output
 

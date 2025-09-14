@@ -8,6 +8,7 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import List, Optional, Tuple
 
 import cv2
 
@@ -358,37 +359,42 @@ def undistort_depth(
     ow: int,
     oh: int,
     f: float,
+    frame_calib=None,
+    out_calib=None,
 ):
     """
     Undistort/rectify depth map using the same method as undistort_image.
     Follows exactly the same process as RGB rectification.
     """
-    # we assume fx and fy are the same
-    proj_params = np.asarray([frame.fx, frame.cx, frame.cy])
-    proj_params = np.concatenate((proj_params, frame.distortion_params))
+    # Create calibration objects if not provided (for reuse in parallel processing)
+    if frame_calib is None:
+        # we assume fx and fy are the same
+        proj_params = np.asarray([frame.fx, frame.cx, frame.cy])
+        proj_params = np.concatenate((proj_params, frame.distortion_params))
 
-    transform_matrix = SE3()
+        transform_matrix = SE3()
 
-    frame_calib = calibration.CameraCalibration(
-        frame.camera_name,
-        calibration.CameraModelType.FISHEYE624,
-        proj_params,
-        transform_matrix,
-        frame.w,
-        frame.h,
-        None,
-        90.0,
-        "",
-    )
-
-    if camera_model == "linear":
-        out_calib = calibration.get_linear_camera_calibration(ow, oh, f)
-    elif camera_model == "spherical":
-        out_calib = calibration.get_spherical_camera_calibration(ow, oh, f)
-    else:
-        raise NotImplementedError(
-            f"cannot recognized camera model type {camera_model} !"
+        frame_calib = calibration.CameraCalibration(
+            frame.camera_name,
+            calibration.CameraModelType.FISHEYE624,
+            proj_params,
+            transform_matrix,
+            frame.w,
+            frame.h,
+            None,
+            90.0,
+            "",
         )
+    
+    if out_calib is None:
+        if camera_model == "linear":
+            out_calib = calibration.get_linear_camera_calibration(ow, oh, f)
+        elif camera_model == "spherical":
+            out_calib = calibration.get_spherical_camera_calibration(ow, oh, f)
+        else:
+            raise NotImplementedError(
+                f"cannot recognized camera model type {camera_model} !"
+            )
 
     # Convert depth to disparity for better interpolation
     valid_mask = depth_raw > 0
@@ -414,6 +420,8 @@ def process_depth_frame(
     rectified_focal: float,
     rectified_h: int,
     rectified_w: int = None,
+    frame_calib=None,
+    out_calib=None,
 ):
     """
     Process a depth frame following the exact same pattern as process_frame for RGB.
@@ -423,7 +431,8 @@ def process_depth_frame(
 
     # Undistort depth using same parameters as RGB
     depth = undistort_depth(
-        frame, depth_raw, camera_model, rectified_w, rectified_h, rectified_focal
+        frame, depth_raw, camera_model, rectified_w, rectified_h, rectified_focal,
+        frame_calib=frame_calib, out_calib=out_calib
     )
 
     # Save rectified depth
@@ -435,7 +444,7 @@ def process_depth_frame(
     np.save(depth_output_path, depth.astype(np.float32))
     
     # Also save as visualization image (optional)
-    if False:  # Set to True to save depth visualization
+    if True:  # Set to True to save depth visualization
         # Normalize depth for visualization (clip to reasonable range)
         depth_vis = depth.copy()
         valid_mask = depth_vis > 0
@@ -664,3 +673,183 @@ def storePly(path, xyz, rgb, normals=None):
     vertex_element = PlyElement.describe(elements, "vertex")
     ply_data = PlyData([vertex_element])
     ply_data.write(path)
+
+
+def calculate_image_sharpness(image: np.ndarray) -> float:
+    """
+    Calculate image sharpness using Laplacian variance.
+    Higher values indicate sharper images.
+    
+    Args:
+        image: Input image as numpy array (can be RGB or grayscale)
+    
+    Returns:
+        Laplacian variance score
+    """
+    if len(image.shape) == 3:
+        # Convert RGB to grayscale
+        gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+    else:
+        gray = image
+    
+    # Calculate Laplacian
+    laplacian = cv2.Laplacian(gray, cv2.CV_64F)
+    variance = laplacian.var()
+    
+    return variance
+
+
+def calculate_pose_delta(pose1: np.ndarray, pose2: np.ndarray) -> tuple[float, float]:
+    """
+    Calculate translation and rotation delta between two poses.
+    
+    Args:
+        pose1: 4x4 transformation matrix
+        pose2: 4x4 transformation matrix
+    
+    Returns:
+        (translation_distance, rotation_angle_degrees)
+    """
+    # Translation delta
+    trans_delta = np.linalg.norm(pose2[:3, 3] - pose1[:3, 3])
+    
+    # Rotation delta using rotation matrix difference
+    R1 = pose1[:3, :3]
+    R2 = pose2[:3, :3]
+    R_delta = R2 @ R1.T
+    
+    # Convert to angle using trace formula: angle = arccos((trace(R) - 1) / 2)
+    trace = np.trace(R_delta)
+    # Clamp to avoid numerical issues
+    trace = np.clip(trace, -1.0, 3.0)
+    angle_rad = np.arccos((trace - 1.0) / 2.0)
+    angle_deg = np.degrees(angle_rad)
+    
+    return trans_delta, angle_deg
+
+
+def filter_frames_by_quality(
+    frames: List[AriaFrame],
+    provider=None,
+    blur_threshold: float = 120.0,
+    trans_threshold: float = 0.15,
+    rot_threshold: float = 3.0,
+    max_angular_velocity: float = 90.0,  # degrees/second
+    input_root: Path = None,
+) -> List[AriaFrame]:
+    """
+    Filter frames based on image quality, IMU data, and pose increments.
+    
+    Args:
+        frames: List of AriaFrame objects
+        provider: VRS data provider for accessing IMU data
+        blur_threshold: Minimum Laplacian variance for sharp images
+        trans_threshold: Minimum translation (meters) between frames
+        rot_threshold: Minimum rotation (degrees) between frames
+        max_angular_velocity: Maximum angular velocity (deg/s) to filter fast rotations
+        input_root: Root directory for image files
+    
+    Returns:
+        Filtered list of frames
+    """
+    filtered_frames = []
+    last_pose = None
+    skipped_blur = 0
+    skipped_pose = 0
+    skipped_imu = 0
+    
+    # Get IMU stream IDs if provider is available
+    imu_stream_ids = []
+    if provider is not None:
+        try:
+            from projectaria_tools.core import data_provider
+            # Try to get IMU stream IDs
+            for label in ["imu-left", "imu-right"]:
+                try:
+                    stream_id = provider.get_stream_id_from_label(label)
+                    if stream_id:
+                        imu_stream_ids.append(stream_id)
+                except:
+                    pass
+        except ImportError:
+            print("Warning: Could not import projectaria_tools for IMU filtering")
+    
+    for i, frame in enumerate(frames):
+        keep_frame = True
+        
+        # 1. Check image sharpness (blur detection)
+        if input_root is not None:
+            try:
+                image_path = input_root / frame.file_path
+                if image_path.exists():
+                    image = np.array(Image.open(image_path))
+                    sharpness = calculate_image_sharpness(image)
+                    
+                    if sharpness < blur_threshold:
+                        keep_frame = False
+                        skipped_blur += 1
+                        continue
+            except Exception as e:
+                print(f"Warning: Could not evaluate sharpness for {frame.file_path}: {e}")
+        
+        # 2. Check IMU angular velocity (filter fast rotations)
+        if provider is not None and len(imu_stream_ids) > 0 and max_angular_velocity > 0:
+            try:
+                from projectaria_tools.core.sensor_data import TimeDomain, TimeQueryOptions
+                
+                # Check angular velocity from IMU data
+                for stream_id in imu_stream_ids:
+                    try:
+                        # Get IMU data at frame timestamp
+                        motion_data = provider.get_imu_data_by_time_ns(
+                            stream_id,
+                            frame.timestamp,
+                            TimeDomain.DEVICE_TIME,
+                            TimeQueryOptions.CLOSEST
+                        )
+                        
+                        if motion_data:
+                            # Angular velocity is in rad/s, convert to deg/s
+                            angular_vel = motion_data.gyro_data
+                            angular_speed = np.linalg.norm(angular_vel)
+                            angular_speed_deg = np.degrees(angular_speed)
+                            
+                            if angular_speed_deg > max_angular_velocity:
+                                keep_frame = False
+                                skipped_imu += 1
+                                break
+                    except:
+                        # If we can't get IMU data for this timestamp, skip the check
+                        pass
+                
+                if not keep_frame:
+                    continue
+                    
+            except Exception as e:
+                print(f"Warning: Could not check IMU data: {e}")
+        
+        # 3. Check pose increment (avoid redundant frames)
+        current_pose = frame.transform_matrix
+        if last_pose is not None:
+            trans_delta, rot_delta = calculate_pose_delta(last_pose, current_pose)
+            
+            # Skip if both translation and rotation are below thresholds
+            if trans_delta < trans_threshold and rot_delta < rot_threshold:
+                keep_frame = False
+                skipped_pose += 1
+                continue
+        
+        # Add frame if it passes all checks
+        if keep_frame:
+            filtered_frames.append(frame)
+            last_pose = current_pose
+    
+    print(f"\nFrame filtering results:")
+    print(f"  Total frames: {len(frames)}")
+    print(f"  Kept frames: {len(filtered_frames)}")
+    print(f"  Skipped due to blur: {skipped_blur}")
+    print(f"  Skipped due to small pose change: {skipped_pose}")
+    print(f"  Skipped due to high angular velocity: {skipped_imu}")
+    print(f"  Reduction: {100 * (1 - len(filtered_frames)/len(frames)):.1f}%")
+    
+    return filtered_frames
