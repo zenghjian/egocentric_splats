@@ -65,6 +65,8 @@ scene:
   dense_skip_pixels: 20  # Skip every N pixels when generating dense point cloud
   dense_downsample_images: 10  # Use every Nth frame for point cloud generation
   dense_max_frames: 100  # Maximum frames to use for dense point cloud
+  filter_dynamic_in_pointcloud: !!bool False  # Filter dynamic objects during dense point cloud generation
+  use_refined_dynamic_detection: !!bool True  # Use intelligent motion detection to refine dynamic/static classification
 
 model:
   sh_degree: 3

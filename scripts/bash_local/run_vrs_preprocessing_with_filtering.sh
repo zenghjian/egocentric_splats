@@ -8,10 +8,10 @@
 
 # VRS preprocessing script with frame quality filtering
 
-# data_root="data/Apartment_release_golden_skeleton_seq100_10s_sample_M1292"
-data_root="data/Apartment_release_work_seq136_M1292"
+data_root="data/Apartment_release_golden_skeleton_seq100_10s_sample_M1292"
+# data_root="data/Apartment_release_work_seq136_M1292"
 vrs_file="video.vrs"
-
+# vrs_file="synthetic_video.vrs"
 # MPS output files
 trajectory_file="${data_root}/mps/slam/closed_loop_trajectory.csv"
 online_calib_file="${data_root}/mps/slam/online_calibration.jsonl"
@@ -26,12 +26,25 @@ rectified_rgb_size=1000
 rectified_monochrome_focal=250
 rectified_monochrome_height=640
 
-# Frame filtering parameters (NEW)
+# Auto-detect video type and set appropriate filtering parameters
+# Default parameters for regular video
 filter_frames="true"  # Enable frame filtering
-blur_threshold=15.0   # Minimum Laplacian variance for sharp images (RGB ~15-20, SLAM ~250-300)
+blur_threshold=15.0   # Minimum Laplacian variance for sharp images
 trans_threshold=0.10  # Minimum translation between frames (meters)
 rot_threshold=2.0     # Minimum rotation between frames (degrees)
 max_angular_velocity=120.0  # Maximum angular velocity (deg/s)
+
+# Check if using synthetic video and adjust parameters accordingly
+if [[ "$vrs_file" == *"synthetic"* ]]; then
+    echo "Detected synthetic video - using optimized parameters for synthetic content"
+    blur_threshold=0.0    # Lower threshold for synthetic images (less texture detail)
+    trans_threshold=0.00  # Lower translation threshold (smoother motion)
+    rot_threshold=0.0     # Lower rotation threshold (more uniform motion)
+    max_angular_velocity=100.0  # Higher tolerance for angular velocity
+else
+    echo "Detected regular video - using standard parameters for real footage"
+    # Keep default parameters for regular video
+fi
 
 # Process arguments
 while [[ $# -gt 0 ]]; do

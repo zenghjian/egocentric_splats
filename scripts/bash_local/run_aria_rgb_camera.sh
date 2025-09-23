@@ -15,12 +15,13 @@
 # data_root=data/aria_scenes/livingroom
 # scene_name="recording/camera-rgb-rectified-1200-h2400"
 
-# data_root=data/Apartment_release_golden_skeleton_seq100_10s_sample_M1292
-data_root=data/Apartment_release_work_seq136_M1292
+data_root=data/Apartment_release_golden_skeleton_seq100_10s_sample_M1292
+# data_root=data/Apartment_release_work_seq136_M1292
 # scene_name="synthetic_video/camera-rgb-rectified-600-h1000"
+scene_name="video/camera-rgb-rectified-600-h1000"
 # data_root=data/Apartment_release_clean_seq131_M1292
 # data_root=data/Apartment_release_decoration_skeleton_seq131_M1292
-scene_name="video/camera-rgb-rectified-600-h1000"
+# scene_name="video/camera-rgb-rectified-600-h1000"
 output_dir="output"/$scene_name
 
 train_model="3dgs"
@@ -36,6 +37,8 @@ mode="improved"  # Default to improved mode
 dense_skip_pixels=20  # Skip every N pixels when generating dense point cloud
 dense_downsample_images=10  # Use every Nth frame for point cloud generation
 dense_max_frames=100  # Maximum frames to use for dense point cloud
+filter_dynamic_in_pointcloud=true  # Filter dynamic objects during point cloud generation
+use_refined_dynamic_detection=true  # Use intelligent motion detection instead of simple labels
 
 # Dense depth supervision options (from ADT depth maps)
 dense_depth_lambda=1.0  # Weight for dense depth loss from ADT
@@ -115,7 +118,7 @@ if [ "$mode" = "improved" ]; then
     use_dense_depth="true"        # Use dense depth supervision from ADT
     use_static_mask_loss="true"   # Use static mask to filter dynamic objects
     use_sparse_depth="false"      # Don't use sparse SLAM points (we have dense)
-    wandb_exp_name="apartment_rgb_improved"
+    wandb_exp_name="apartment_rgb_improved_video"
 elif [ "$mode" = "original" ]; then
     echo "================================================"
     echo "Using ORIGINAL mode (traditional 3DGS)"
@@ -174,6 +177,8 @@ python train_lightning.py \
     scene.dense_skip_pixels=$dense_skip_pixels \
     scene.dense_downsample_images=$dense_downsample_images \
     scene.dense_max_frames=$dense_max_frames \
+    scene.filter_dynamic_in_pointcloud=$filter_dynamic_in_pointcloud \
+    scene.use_refined_dynamic_detection=$use_refined_dynamic_detection \
     wandb.project="$wandb_project_name" \
     wandb.use_wandb=true \
     exp_name=$wandb_exp_name \

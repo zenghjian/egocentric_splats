@@ -697,19 +697,41 @@ def readAriaSceneInfo(
     # Check if scene_cfg has the attribute (it's a config object, not a dict)
     use_dense_pointcloud = getattr(scene_cfg, "use_dense_pointcloud", False)
     depth_maps_folder = input_folder / "depth_maps"
+    filter_dynamic_in_pointcloud = getattr(scene_cfg, "filter_dynamic_in_pointcloud", False)
     
     if use_dense_pointcloud and depth_maps_folder.exists():
         print(f"Generating dense point cloud from rectified depth maps in {depth_maps_folder}")
-        # Generate dense point cloud from rectified depth maps
-        from utils.depth_maps_to_pointcloud import generate_pointcloud_from_depth_maps
         
-        points_world, colors = generate_pointcloud_from_depth_maps(
-            depth_maps_folder=depth_maps_folder,
-            transforms_json_path=input_folder / "transforms_with_sparse_depth.json",
-            skip_n_pixels=getattr(scene_cfg, "dense_skip_pixels", 20),
-            downsample_images=getattr(scene_cfg, "dense_downsample_images", 10),
-            max_frames=getattr(scene_cfg, "dense_max_frames", 100),
-        )
+        # Check if we should filter dynamic objects during point cloud generation
+        masks_folder = input_folder / "masks"
+        instance_info_path = input_folder / "instance_info.json"
+        
+        if filter_dynamic_in_pointcloud and masks_folder.exists() and instance_info_path.exists():
+            print("Using mask-filtered point cloud generation to remove dynamic objects")
+            from utils.depth_maps_to_pointcloud_with_mask import generate_pointcloud_from_depth_maps_with_mask
+            
+            points_world, colors = generate_pointcloud_from_depth_maps_with_mask(
+                depth_maps_folder=depth_maps_folder,
+                transforms_json_path=input_folder / "transforms_with_sparse_depth.json",
+                masks_folder=masks_folder,
+                instance_info_path=instance_info_path,
+                skip_n_pixels=getattr(scene_cfg, "dense_skip_pixels", 20),
+                downsample_images=getattr(scene_cfg, "dense_downsample_images", 10),
+                max_frames=getattr(scene_cfg, "dense_max_frames", 100),
+                filter_dynamic=True,
+                use_refined_detection=getattr(scene_cfg, "use_refined_dynamic_detection", True),
+            )
+        else:
+            # Use original function without mask filtering
+            from utils.depth_maps_to_pointcloud import generate_pointcloud_from_depth_maps
+            
+            points_world, colors = generate_pointcloud_from_depth_maps(
+                depth_maps_folder=depth_maps_folder,
+                transforms_json_path=input_folder / "transforms_with_sparse_depth.json",
+                skip_n_pixels=getattr(scene_cfg, "dense_skip_pixels", 20),
+                downsample_images=getattr(scene_cfg, "dense_downsample_images", 10),
+                max_frames=getattr(scene_cfg, "dense_max_frames", 100),
+            )
         
         # Set points_path to None since we're not saving to file
         points_path = None

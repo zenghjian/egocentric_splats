@@ -1296,10 +1296,24 @@ class CameraDataset(Dataset):
                 
                 if instance_info_path.exists():
                     import json
-                    with open(instance_info_path, 'r') as f:
-                        instance_info = json.load(f)
-                        static_ids = instance_info.get("static_ids", None)
-                        dynamic_ids = instance_info.get("dynamic_ids", None)
+                    # Try to load refined instance info first (from intelligent motion detection)
+                    refined_path = instance_info_path.parent / "instance_info_refined.json"
+                    if refined_path.exists():
+                        with open(refined_path, 'r') as f:
+                            instance_info = json.load(f)
+                            static_ids = instance_info.get("static_ids", None)
+                            dynamic_ids = instance_info.get("dynamic_ids", None)
+                            # Log that we're using refined detection
+                            if hasattr(instance_info, 'metadata'):
+                                falsely_dynamic = instance_info['metadata'].get('falsely_dynamic_count', 0)
+                                if falsely_dynamic > 0:
+                                    print(f"Using refined mask: {falsely_dynamic} objects reclassified as static")
+                    else:
+                        # Fall back to original instance info
+                        with open(instance_info_path, 'r') as f:
+                            instance_info = json.load(f)
+                            static_ids = instance_info.get("static_ids", None)
+                            dynamic_ids = instance_info.get("dynamic_ids", None)
                 
                 # Load segmentation and generate masks
                 static_mask, dynamic_mask, seg_data = cam.load_segmentation(static_ids, dynamic_ids)
