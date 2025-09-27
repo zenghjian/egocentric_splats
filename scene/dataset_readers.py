@@ -444,8 +444,10 @@ def read_Aria_transform_json(
         if masks_folder.exists():
             # Get timestamp from frame
             timestamp_ns = frame.get("timestamp", idx)
-            seg_filename = f"seg_{idx:06d}.pkl.gz"
+            # Try timestamp-based naming first (new format)
+            seg_filename = f"seg_{timestamp_ns}.pkl.gz"
             seg_path = masks_folder / seg_filename
+
             if seg_path.exists():
                 segmentation_path = str(seg_path)
                 print(f"Found segmentation for frame {idx}: {seg_filename}") if idx == 0 else None

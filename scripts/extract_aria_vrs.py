@@ -694,7 +694,7 @@ def run_single_sequence(
         # Rectify ADT depth maps for RGB camera if available
         if camera_label == "camera-rgb":
             # Check for depth_images.vrs in the input root directory
-            depth_images_path = output_path.parent / "depth_images.vrs"
+            depth_images_path = recording_folder / "depth_images.vrs"
             if depth_images_path.exists():
                 print(f"==> Found ADT depth maps, rectifying depth for {camera_label}")
                 
@@ -708,7 +708,7 @@ def run_single_sequence(
                     from projectaria_tools.core.stream_id import StreamId
                     
                     # Initialize ADT provider
-                    paths_provider = AriaDigitalTwinDataPathsProvider(str(output_path.parent))
+                    paths_provider = AriaDigitalTwinDataPathsProvider(str(recording_folder))
                     data_paths = paths_provider.get_datapaths()
                     gt_provider = AriaDigitalTwinDataProvider(data_paths)
                     
@@ -860,7 +860,7 @@ def run_single_sequence(
                                 # 1. Save raw segmentation data
                                 seg_folder = rectified_image_folder / "masks"  # Use "masks" like EgoLifter
                                 seg_folder.mkdir(exist_ok=True)
-                                seg_filename = f"seg_{i:06d}.pkl.gz"
+                                seg_filename = f"seg_{timestamp_ns}.pkl.gz"
                                 import pickle
                                 import gzip
                                 
@@ -876,7 +876,7 @@ def run_single_sequence(
                                 # 2. Save segmentation visualization (like EgoLifter)
                                 seg_viz_folder = rectified_image_folder / "masks_viz"
                                 seg_viz_folder.mkdir(exist_ok=True)
-                                seg_viz_filename = f"seg_{i:06d}.jpg"
+                                seg_viz_filename = f"seg_{timestamp_ns}.png"
                                 
                                 # Get visualization of segmentation
                                 if seg_data is not None and seg_data.is_valid():

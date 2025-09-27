@@ -9,8 +9,9 @@
 # VRS preprocessing script with frame quality filtering
 
 # data_root="data/Apartment_release_golden_skeleton_seq100_10s_sample_M1292"
-data_root="data/Apartment_release_work_seq136_M1292"
-vrs_file="video.vrs"
+data_root="data/Apartment_release_clean_seq134_M1292"
+# vrs_file="video.vrs"
+vrs_file="synthetic_video.vrs"
 
 # MPS output files
 trajectory_file="${data_root}/mps/slam/closed_loop_trajectory.csv"
@@ -18,7 +19,10 @@ online_calib_file="${data_root}/mps/slam/online_calibration.jsonl"
 semidense_points_file="${data_root}/mps/slam/semidense_points.csv.gz"
 semidense_observation_file="${data_root}/mps/slam/semidense_observations.csv.gz"
 
-output_root="${data_root}"
+# Allow custom output root (e.g., for external drives)
+# output_root="${data_root}"
+scene_name=$(basename "${data_root}")
+output_root="/media/huajianzeng/T9/adt_preprocessed/${scene_name}"
 
 # Rectification parameters
 rectified_rgb_focal=600
@@ -27,7 +31,7 @@ rectified_monochrome_focal=250
 rectified_monochrome_height=640
 
 # Frame filtering parameters (NEW)
-filter_frames="true"  # Enable frame filtering
+filter_frames="false"  # Enable frame filtering
 blur_threshold=15.0   # Minimum Laplacian variance for sharp images (RGB ~15-20, SLAM ~250-300)
 trans_threshold=0.10  # Minimum translation between frames (meters)
 rot_threshold=2.0     # Minimum rotation between frames (degrees)
