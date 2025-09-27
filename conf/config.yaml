@@ -43,7 +43,8 @@ scene:
 
   data_format: "transforms_with_sparse_depth.json"
   # validation set will take 1/8 of all images if using 7-1. The 7-1 is same as the default test_every 8 option commonly used
-  train_split: "7-1" # other options: 4-1
+  # train_split: "7-1" # other options: 4-1
+  train_split: "7-1"
 
   load_ply: "" # If set, the Gaussians will be initialized from the given PLY file.
   load_nerf_normalization: "" # If set, load an existing normalization to all camera entries.

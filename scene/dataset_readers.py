@@ -678,6 +678,11 @@ def readAriaSceneInfo(
                 "will use 7/8 of split for training, and 1/8 for validation and testing."
             )
             valid_interval = 8
+        elif train_split == "99-1":
+            print(
+                "will use 99/100 of split for training, and 1/100 for validation and testing."
+            )
+            valid_interval = 100            
         else:
             raise RuntimeError(f"Cannot recognize train_split: {train_split}")
 

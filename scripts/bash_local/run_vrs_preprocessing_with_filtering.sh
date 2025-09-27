@@ -32,10 +32,10 @@ rectified_monochrome_focal=250
 rectified_monochrome_height=640
 
 # Frame filtering parameters (NEW)
-filter_frames="false"  # Enable frame filtering
-blur_threshold=15.0   # Minimum Laplacian variance for sharp images (RGB ~15-20, SLAM ~250-300)
-trans_threshold=0.10  # Minimum translation between frames (meters)
-rot_threshold=2.0     # Minimum rotation between frames (degrees)
+filter_frames="true"  # Enable frame filtering
+blur_threshold=10.0   # Minimum Laplacian variance for sharp images (RGB ~15-20, SLAM ~250-300)
+trans_threshold=0.05  # Minimum translation between frames (meters)
+rot_threshold=1.0     # Minimum rotation between frames (degrees)
 max_angular_velocity=120.0  # Maximum angular velocity (deg/s)
 
 # Process arguments

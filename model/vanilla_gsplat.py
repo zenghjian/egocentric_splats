@@ -1184,11 +1184,22 @@ class VanillaGSplat(L.LightningModule):
             dense_depth_mask = batch.get("dense_depth_mask", None)
             if dense_depth_mask is not None:
                 dense_depth_mask = dense_depth_mask.to(self.device)
-            
+
+            # Combine dense depth mask with static mask if using static mask loss
+            combined_mask = dense_depth_mask
+            if self.cfg.opt.use_static_mask_loss and static_mask is not None:
+                # Both masks should be True for valid pixels
+                # static_mask (valid_mask) is True for static regions
+                # dense_depth_mask is True for valid depth values
+                if combined_mask is not None:
+                    combined_mask = combined_mask & valid_mask
+                else:
+                    combined_mask = valid_mask
+
             dense_depth_loss = calculate_dense_depth_loss(
                 render_depth=renders["depth"] / self.scene_scale,
                 gt_depth=dense_depth,
-                valid_mask=dense_depth_mask,
+                valid_mask=combined_mask,
                 loss_type=self.cfg.opt.dense_depth_loss_type,
                 use_inverse_depth=self.cfg.opt.use_inverse_depth,
             )
