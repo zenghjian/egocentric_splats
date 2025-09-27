@@ -9,7 +9,8 @@
 # VRS preprocessing script with frame quality filtering
 
 # data_root="data/Apartment_release_golden_skeleton_seq100_10s_sample_M1292"
-data_root="data/Apartment_release_clean_seq134_M1292"
+# data_root="data/Apartment_release_clean_seq134_M1292"
+data_root="data/Apartment_release_work_seq136_M1292"
 # vrs_file="video.vrs"
 vrs_file="synthetic_video.vrs"
 
@@ -22,7 +23,7 @@ semidense_observation_file="${data_root}/mps/slam/semidense_observations.csv.gz"
 # Allow custom output root (e.g., for external drives)
 # output_root="${data_root}"
 scene_name=$(basename "${data_root}")
-output_root="/media/huajianzeng/T9/adt_preprocessed/${scene_name}"
+output_root="data_preprocessed/${scene_name}"
 
 # Rectification parameters
 rectified_rgb_focal=600

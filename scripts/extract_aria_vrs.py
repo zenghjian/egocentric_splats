@@ -717,18 +717,27 @@ def run_single_sequence(
                     # RGB camera stream
                     rgb_stream_id = StreamId("214-1")
                     
-                    # Get camera calibration from ADT
-                    camera_calib = gt_provider.get_aria_camera_calibration(rgb_stream_id)
-                    
-                    # Extract fisheye624 distortion parameters
-                    distortion_params = np.array([
-                        camera_calib.get_projection_params()[3],  # k1
-                        camera_calib.get_projection_params()[4],  # k2
-                        camera_calib.get_projection_params()[5],  # k3
-                        camera_calib.get_projection_params()[6],  # k4
-                        camera_calib.get_projection_params()[7],  # k5
-                        camera_calib.get_projection_params()[8],  # k6
-                    ])
+                    # IMPORTANT: Use the same per-frame intrinsics used for RGB rectification
+                    # to guarantee alignment between RGB, depth, and segmentation.
+                    # We build a timestamp->intrinsics map from the RGB transforms.json produced above.
+                    with open(input_json_path, "r") as f_in:
+                        rgb_intr_meta = json.load(f_in)
+                    rgb_intr_by_ts = {}
+                    for frm in rgb_intr_meta.get("frames", []):
+                        ts = int(frm["timestamp"])
+                        # For FISHEYE624, the first 3 params are [f, cx, cy]
+                        f_val = float(frm["fl_x"])  # stored as fx in our JSON, used as f for fisheye
+                        cx_val = float(frm["cx"])
+                        cy_val = float(frm["cy"])
+                        dist = np.asarray(frm["distortion_params"], dtype=np.float64)
+                        rgb_intr_by_ts[ts] = {
+                            "f": f_val,
+                            "cx": cx_val,
+                            "cy": cy_val,
+                            "dist": dist,
+                            "w": int(frm["w"]),
+                            "h": int(frm["h"]),
+                        }
                     
                     # Identify static and dynamic instances (following EgoLifter approach)
                     print("==> Identifying static and dynamic instances...")
@@ -774,48 +783,28 @@ def run_single_sequence(
                         json.dump(instance_info, f, indent=2)
                     print(f"  Saved instance info to {instance_info_path}")
                     
-                    # Pre-create calibration objects for reuse (avoid thread safety issues)
+                    # Pre-create OUT calibration object (shared across frames) to avoid thread-safety issues
                     from projectaria_tools.core import calibration as calib_module
                     from projectaria_tools.core.sophus import SE3
-                    
-                    # Create frame calibration
-                    proj_params_base = np.asarray([
-                        camera_calib.get_projection_params()[0],  # fx
-                        camera_calib.get_projection_params()[1],  # cx
-                        camera_calib.get_projection_params()[2],  # cy
-                    ])
-                    proj_params_full = np.concatenate((proj_params_base, distortion_params))
-                    
-                    base_frame_calib = calib_module.CameraCalibration(
-                        "camera-rgb",
-                        calib_module.CameraModelType.FISHEYE624,
-                        proj_params_full,
-                        SE3(),
-                        camera_calib.get_image_size()[0],
-                        camera_calib.get_image_size()[1],
-                        None,
-                        90.0,
-                        "",
-                    )
                     
                     # Create output calibration
                     if rectified_camera_model == "linear":
                         base_out_calib = calib_module.get_linear_camera_calibration(
-                            rectified_frames[0]["w"] if rectified_frames else 1000, 
-                            rec_height, 
-                            rec_focal
+                            rectified_frames[0]["w"] if rectified_frames else 1000,
+                            rec_height,
+                            rec_focal,
                         )
                     elif rectified_camera_model == "spherical":
                         base_out_calib = calib_module.get_spherical_camera_calibration(
-                            rectified_frames[0]["w"] if rectified_frames else 1000, 
-                            rec_height, 
-                            rec_focal
+                            rectified_frames[0]["w"] if rectified_frames else 1000,
+                            rec_height,
+                            rec_focal,
                         )
                     else:
                         base_out_calib = calib_module.get_linear_camera_calibration(
-                            rectified_frames[0]["w"] if rectified_frames else 1000, 
-                            rec_height, 
-                            rec_focal
+                            rectified_frames[0]["w"] if rectified_frames else 1000,
+                            rec_height,
+                            rec_focal,
                         )
                     
                     # Define helper function for processing single depth frame
@@ -834,6 +823,9 @@ def run_single_sequence(
                         # Convert to meters
                         depth_mm = depth_data.data().to_numpy_array()
                         depth_m = depth_mm.astype(np.float32) / 1000.0
+                        if not (depth_m > 0).any():
+                            # No valid depth returned for this timestamp
+                            return i, None
                         
                         # Always save segmentation mask (EgoLifter approach)
                         # We save the raw segmentation, not filtered
@@ -845,6 +837,13 @@ def run_single_sequence(
                             
                             if seg_data is not None and seg_data.is_valid():
                                 segmentation = seg_data.data().to_numpy_array()
+                                # Basic sanity check: report unique labels for first few frames
+                                try:
+                                    if i < 3:
+                                        uniq = np.unique(segmentation)
+                                        print(f"Seg unique ids @ {timestamp_ns}: {len(uniq)} labels, min={uniq.min()}, max={uniq.max()}")
+                                except Exception:
+                                    pass
                                 
                                 # Create static mask
                                 static_mask = np.zeros_like(segmentation, dtype=bool)
@@ -864,11 +863,39 @@ def run_single_sequence(
                                 import pickle
                                 import gzip
                                 
-                                # Rectify segmentation with label-preserving distortion
-                                # Use pre-created calibration objects to avoid thread safety issues
-                                rectified_seg = calib_module.distort_label_by_calibration(
-                                    segmentation, base_out_calib, base_frame_calib
-                                )
+                                # Rectify segmentation with label-preserving distortion using per-frame intrinsics
+                                intr = rgb_intr_by_ts.get(timestamp_ns)
+                                if intr is None:
+                                    # Fallback: pick nearest timestamp available in intr map
+                                    # This handles cases where ts differs by a few microseconds
+                                    try:
+                                        ts_keys = np.array(list(rgb_intr_by_ts.keys()))
+                                        nearest_idx = np.abs(ts_keys - timestamp_ns).argmin()
+                                        intr = rgb_intr_by_ts[int(ts_keys[nearest_idx])]
+                                    except Exception:
+                                        intr = None
+                                if intr is not None:
+                                    proj_params_full = np.concatenate((
+                                        np.asarray([intr["f"], intr["cx"], intr["cy"]], dtype=np.float64),
+                                        intr["dist"],
+                                    ))
+                                    frame_calib_local = calib_module.CameraCalibration(
+                                        "camera-rgb",
+                                        calib_module.CameraModelType.FISHEYE624,
+                                        proj_params_full,
+                                        SE3(),
+                                        intr["w"],
+                                        intr["h"],
+                                        None,
+                                        90.0,
+                                        "",
+                                    )
+                                    rectified_seg = calib_module.distort_label_by_calibration(
+                                        segmentation, base_out_calib, frame_calib_local
+                                    )
+                                else:
+                                    # As a last resort, copy segmentation without rectification
+                                    rectified_seg = segmentation
                                 
                                 with gzip.open(seg_folder / seg_filename, 'wb') as f:
                                     pickle.dump(rectified_seg, f)
@@ -882,12 +909,37 @@ def run_single_sequence(
                                 if seg_data is not None and seg_data.is_valid():
                                     # Get the visualizable version from ADT
                                     seg_viz = seg_data.data().get_visualizable().to_numpy_array()
-                                    # Rectify the visualization
-                                    # Use pre-created calibration objects
-                                    rectified_seg_viz = calib_module.distort_label_by_calibration(
-                                        seg_viz, base_out_calib, base_frame_calib
-                                    )
-                                    # Save as JPEG
+                                    # Rectify the visualization using per-frame intrinsics as well
+                                    intr_v = rgb_intr_by_ts.get(timestamp_ns)
+                                    if intr_v is None:
+                                        try:
+                                            ts_keys = np.array(list(rgb_intr_by_ts.keys()))
+                                            nearest_idx = np.abs(ts_keys - timestamp_ns).argmin()
+                                            intr_v = rgb_intr_by_ts[int(ts_keys[nearest_idx])]
+                                        except Exception:
+                                            intr_v = None
+                                    if intr_v is not None:
+                                        proj_params_full_v = np.concatenate((
+                                            np.asarray([intr_v["f"], intr_v["cx"], intr_v["cy"]], dtype=np.float64),
+                                            intr_v["dist"],
+                                        ))
+                                        frame_calib_local_v = calib_module.CameraCalibration(
+                                            "camera-rgb",
+                                            calib_module.CameraModelType.FISHEYE624,
+                                            proj_params_full_v,
+                                            SE3(),
+                                            intr_v["w"],
+                                            intr_v["h"],
+                                            None,
+                                            90.0,
+                                            "",
+                                        )
+                                        rectified_seg_viz = calib_module.distort_label_by_calibration(
+                                            seg_viz, base_out_calib, frame_calib_local_v
+                                        )
+                                    else:
+                                        rectified_seg_viz = seg_viz
+                                    # Save as PNG
                                     Image.fromarray(rectified_seg_viz).save(
                                         seg_viz_folder / seg_viz_filename
                                     )
@@ -896,14 +948,29 @@ def run_single_sequence(
                                 pass  # Silent for parallel processing
                         
                         # Create AriaFrame for depth rectification
+                        # Build per-frame input calibration from RGB transforms to match image rectification
+                        intr = rgb_intr_by_ts.get(timestamp_ns)
+                        if intr is None:
+                            # Fallback to nearest
+                            try:
+                                ts_keys = np.array(list(rgb_intr_by_ts.keys()))
+                                nearest_idx = np.abs(ts_keys - timestamp_ns).argmin()
+                                intr = rgb_intr_by_ts[int(ts_keys[nearest_idx])]
+                            except Exception:
+                                intr = None
+
+                        if intr is None:
+                            # Cannot rectify without intrinsics
+                            return i, None
+
                         depth_frame = AriaFrame(
-                            fx=camera_calib.get_projection_params()[0],
-                            fy=camera_calib.get_projection_params()[0],  # Assume fx = fy
-                            cx=camera_calib.get_projection_params()[1],
-                            cy=camera_calib.get_projection_params()[2],
-                            distortion_params=distortion_params,
-                            w=camera_calib.get_image_size()[0],
-                            h=camera_calib.get_image_size()[1],
+                            fx=intr["f"],
+                            fy=intr["f"],  # FISHEYE624 uses single f; keep fy for completeness
+                            cx=intr["cx"],
+                            cy=intr["cy"],
+                            distortion_params=intr["dist"],
+                            w=intr["w"],
+                            h=intr["h"],
                             file_path="",
                             camera_modality="camera-rgb",
                             camera2device=np.eye(4),
@@ -920,6 +987,23 @@ def run_single_sequence(
                         
                         # Process depth frame with same parameters as RGB
                         # Pass calibration objects to avoid recreation in parallel processing
+                        # Create per-frame frame_calib using the same intrinsics
+                        proj_params_full = np.concatenate((
+                            np.asarray([intr["f"], intr["cx"], intr["cy"]], dtype=np.float64),
+                            intr["dist"],
+                        ))
+                        frame_calib_local = calib_module.CameraCalibration(
+                            "camera-rgb",
+                            calib_module.CameraModelType.FISHEYE624,
+                            proj_params_full,
+                            SE3(),
+                            intr["w"],
+                            intr["h"],
+                            None,
+                            90.0,
+                            "",
+                        )
+
                         depth_info = process_depth_frame(
                             depth_frame,
                             depth_m,
@@ -928,38 +1012,18 @@ def run_single_sequence(
                             rec_focal,
                             rec_height,
                             rec_frame["w"],  # Use same width as rectified RGB
-                            frame_calib=base_frame_calib,
+                            frame_calib=frame_calib_local,
                             out_calib=base_out_calib
                         )
                         
                         return i, depth_info
                     
-                    # Process depth frames in parallel
-                    if parallel_process:
-                        print("Parallel processing depth maps...")
-                        num_depth_process = 24
-                        for batch_i in tqdm(range(0, len(rectified_frames), num_depth_process), desc="Rectifying depth maps"):
-                            num_process_to_launch = min(len(rectified_frames) - batch_i, num_depth_process)
-                            with ThreadPoolExecutor(max_workers=num_depth_process) as e:
-                                futures = [
-                                    e.submit(
-                                        process_single_depth_frame,
-                                        (batch_i + j, rectified_frames[batch_i + j])
-                                    )
-                                    for j in range(num_process_to_launch)
-                                ]
-                                results = [future.result() for future in futures]
-                                
-                                # Update rectified_frames with depth info
-                                for idx, depth_info in results:
-                                    if depth_info is not None:
-                                        rectified_frames[idx].update(depth_info)
-                    else:
-                        # Sequential processing
-                        for i, rec_frame in enumerate(tqdm(rectified_frames, desc="Rectifying depth maps")):
-                            idx, depth_info = process_single_depth_frame((i, rec_frame))
-                            if depth_info is not None:
-                                rec_frame.update(depth_info)
+                    # IMPORTANT: ADT provider is not thread-safe. Always process sequentially
+                    # to avoid repeated/incorrect segmentation across batches.
+                    for i, rec_frame in enumerate(tqdm(rectified_frames, desc="Rectifying depth/seg (sequential)")):
+                        idx, depth_info = process_single_depth_frame((i, rec_frame))
+                        if depth_info is not None:
+                            rec_frame.update(depth_info)
                     
                     print(f"==> Rectified depth maps saved to {rectified_image_folder / 'depth_maps'}")
                         
